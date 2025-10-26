@@ -24,6 +24,55 @@ std::array<math::Vec3, 10> make_directions() {
 
 const std::array<math::Vec3, 10> kDirections = make_directions();
 
+double determinant(const math::Mat3& m) {
+  const auto& a = m.m;
+  return a[0] * (a[4] * a[8] - a[5] * a[7]) -
+         a[1] * (a[3] * a[8] - a[5] * a[6]) +
+         a[2] * (a[3] * a[7] - a[4] * a[6]);
+}
+
+bool invert(const math::Mat3& m, math::Mat3& out) {
+  const auto& a = m.m;
+  const double det = determinant(m);
+  if (std::fabs(det) <= math::kEps) {
+    return false;
+  }
+  const double inv_det = 1.0 / det;
+  out = math::Mat3({{(a[4] * a[8] - a[5] * a[7]) * inv_det,
+                     (a[2] * a[7] - a[1] * a[8]) * inv_det,
+                     (a[1] * a[5] - a[2] * a[4]) * inv_det,
+                     (a[5] * a[6] - a[3] * a[8]) * inv_det,
+                     (a[0] * a[8] - a[2] * a[6]) * inv_det,
+                     (a[2] * a[3] - a[0] * a[5]) * inv_det,
+                     (a[3] * a[7] - a[4] * a[6]) * inv_det,
+                     (a[1] * a[6] - a[0] * a[7]) * inv_det,
+                     (a[0] * a[4] - a[1] * a[3]) * inv_det}});
+  return true;
+}
+
+math::Vec3 solve(const math::Mat3& A, const math::Vec3& b) {
+  math::Mat3 inv;
+  if (!invert(A, inv)) {
+    return math::Vec3();
+  }
+  return inv * b;
+}
+
+double total_energy(const std::vector<RigidBody>& bodies) {
+  double energy = 0.0;
+  for (const RigidBody& b : bodies) {
+    if (b.invMass > math::kEps) {
+      const double mass = 1.0 / b.invMass;
+      energy += 0.5 * mass * math::dot(b.v, b.v);
+    }
+    if (math::length2(b.w) > math::kEps * math::kEps) {
+      math::Vec3 L = solve(b.invInertiaWorld, b.w);
+      energy += 0.5 * math::dot(b.w, L);
+    }
+  }
+  return energy;
+}
+
 inline double directional_sum(const std::vector<RigidBody>& bodies,
                               const math::Vec3& dir) {
   double sum = 0.0;
@@ -56,5 +105,32 @@ double constraint_penetration_Linf(const std::vector<Contact>& contacts) {
     max_pen = std::max(max_pen, std::fabs(c.penetration));
   }
   return max_pen;
+}
+
+double energy_drift(const std::vector<RigidBody>& pre,
+                    const std::vector<RigidBody>& post) {
+  const double before = total_energy(pre);
+  const double after = total_energy(post);
+  return after - before;
+}
+
+double cone_consistency(const std::vector<Contact>& contacts) {
+  std::size_t considered = 0;
+  std::size_t satisfied = 0;
+  for (const Contact& c : contacts) {
+    if (c.a < 0 || c.b < 0) {
+      continue;
+    }
+    ++considered;
+    const double friction_limit = c.mu * std::max(c.jn, 0.0) + 1e-12;
+    const double jt_mag = std::sqrt(c.jt1 * c.jt1 + c.jt2 * c.jt2);
+    if (jt_mag <= friction_limit) {
+      ++satisfied;
+    }
+  }
+  if (considered == 0) {
+    return 1.0;
+  }
+  return static_cast<double>(satisfied) / static_cast<double>(considered);
 }
 
