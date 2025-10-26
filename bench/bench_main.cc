@@ -1,6 +1,7 @@
 #include "benchmark/benchmark.h"
 
 #include "contact_gen.hpp"
+#include "joints.hpp"
 #include "metrics.hpp"
 #include "scenes.hpp"
 #include "solver_baseline_vec.hpp"
@@ -22,11 +23,13 @@ struct BenchmarkResult {
   int iterations = 0;
   std::size_t bodies = 0;
   std::size_t contacts = 0;
+  std::size_t joints = 0;
   double ms_per_step = 0.0;
   double drift_max = 0.0;
   double penetration_linf = 0.0;
   double energy_drift = 0.0;
   double cone_consistency = 0.0;
+  double joint_Linf = 0.0;
 };
 
 std::vector<BenchmarkResult> g_results;
@@ -55,11 +58,13 @@ BenchmarkResult run_baseline_result(const std::string& scene_name,
   result.iterations = params.iterations;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
   result.ms_per_step = ms_per_step;
   result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
   result.penetration_linf = constraint_penetration_Linf(contacts);
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(base_scene.joints);
   return result;
 }
 
@@ -70,22 +75,27 @@ BenchmarkResult run_cached_result(const std::string& scene_name,
                                   double ms_per_step) {
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
+  std::vector<DistanceJoint> joints = base_scene.joints;
   const std::vector<RigidBody> pre = bodies;
   for (int i = 0; i < steps; ++i) {
     build_contact_offsets_and_bias(bodies, contacts, params);
-    solve_scalar_cached(bodies, contacts, params);
+    build_distance_joint_rows(bodies, joints, params.dt);
+    solve_scalar_cached(bodies, contacts, joints, params);
   }
+  build_distance_joint_rows(bodies, joints, params.dt);
   BenchmarkResult result;
   result.scene = scene_name;
   result.solver = "scalar_cached";
   result.iterations = params.iterations;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
   result.ms_per_step = ms_per_step;
   result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
   result.penetration_linf = constraint_penetration_Linf(contacts);
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(joints);
   return result;
 }
 
@@ -96,23 +106,30 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
                                double ms_per_step) {
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
+  std::vector<DistanceJoint> joints = base_scene.joints;
   const std::vector<RigidBody> pre = bodies;
   for (int i = 0; i < steps; ++i) {
     build_contact_offsets_and_bias(bodies, contacts, params);
     RowSOA rows = build_soa(bodies, contacts, params);
-    solve_scalar_soa(bodies, contacts, rows, params);
+    build_distance_joint_rows(bodies, joints, params.dt);
+    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+    solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+    scatter_joint_impulses(joint_rows, joints);
   }
+  build_distance_joint_rows(bodies, joints, params.dt);
   BenchmarkResult result;
   result.scene = scene_name;
   result.solver = "scalar_soa";
   result.iterations = params.iterations;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
   result.ms_per_step = ms_per_step;
   result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
   result.penetration_linf = constraint_penetration_Linf(contacts);
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(joints);
   return result;
 }
 
@@ -125,9 +142,10 @@ double run_benchmark_loop(benchmark::State& state,
   for (auto _ : state) {
     std::vector<RigidBody> bodies = base_scene.bodies;
     std::vector<Contact> contacts = base_scene.contacts;
+    std::vector<DistanceJoint> joints = base_scene.joints;
     const auto start = std::chrono::steady_clock::now();
     for (int step = 0; step < kStepsPerRun; ++step) {
-      step_fn(bodies, contacts);
+      step_fn(bodies, contacts, joints);
     }
     const auto end = std::chrono::steady_clock::now();
     const double elapsed = std::chrono::duration<double>(end - start).count();
@@ -146,6 +164,8 @@ void update_counters(benchmark::State& state,
       static_cast<double>(scene.bodies.size()), benchmark::Counter::kAvgThreads);
   state.counters["contacts"] = benchmark::Counter(
       static_cast<double>(scene.contacts.size()), benchmark::Counter::kAvgThreads);
+  state.counters["joints"] = benchmark::Counter(
+      static_cast<double>(scene.joints.size()), benchmark::Counter::kAvgThreads);
   state.counters["ms_per_step"] =
       benchmark::Counter(ms_per_step, benchmark::Counter::kAvgThreads);
 }
@@ -161,7 +181,10 @@ void BenchSpheresCloudBaseline4096(benchmark::State& state) {
   params.dt = 1.0 / 60.0;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        (void)joints;
         build_contact_offsets_and_bias(bodies, contacts, params);
         solve_baseline(bodies, contacts, params);
       });
@@ -188,9 +211,12 @@ void BenchSpheresCloudCached4096(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        solve_scalar_cached(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
       });
 
   update_counters(state, base_scene, ms_per_step);
@@ -215,10 +241,15 @@ void BenchSpheresCloudSoA4096(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
         RowSOA rows = build_soa(bodies, contacts, params);
-        solve_scalar_soa(bodies, contacts, rows, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
       });
 
   update_counters(state, base_scene, ms_per_step);
@@ -241,7 +272,10 @@ void BenchSpheresCloudBaseline8192(benchmark::State& state) {
   params.dt = 1.0 / 60.0;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        (void)joints;
         build_contact_offsets_and_bias(bodies, contacts, params);
         solve_baseline(bodies, contacts, params);
       });
@@ -268,9 +302,12 @@ void BenchSpheresCloudCached8192(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        solve_scalar_cached(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
       });
 
   update_counters(state, base_scene, ms_per_step);
@@ -295,10 +332,15 @@ void BenchSpheresCloudSoA8192(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
         RowSOA rows = build_soa(bodies, contacts, params);
-        solve_scalar_soa(bodies, contacts, rows, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
       });
 
   update_counters(state, base_scene, ms_per_step);
@@ -321,7 +363,10 @@ void BenchBoxStackBaseline(benchmark::State& state) {
   params.dt = 1.0 / 60.0;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        (void)joints;
         build_contact_offsets_and_bias(bodies, contacts, params);
         solve_baseline(bodies, contacts, params);
       });
@@ -348,9 +393,12 @@ void BenchBoxStackCached(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        solve_scalar_cached(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
       });
 
   update_counters(state, base_scene, ms_per_step);
@@ -375,16 +423,205 @@ void BenchBoxStackSoA(benchmark::State& state) {
   params.warm_start = true;
 
   const double ms_per_step = run_benchmark_loop(
-      state, base_scene, [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts) {
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
         build_contact_offsets_and_bias(bodies, contacts, params);
         RowSOA rows = build_soa(bodies, contacts, params);
-        solve_scalar_soa(bodies, contacts, rows, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
       });
 
   update_counters(state, base_scene, ms_per_step);
 
   if (state.thread_index == 0 && !recorded) {
     record_result(run_soa_result("box_stack_8", base_scene, params, kStepsPerRun,
+                                 ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchPendulumCached(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_pendulum(1);
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        (void)contacts;
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_cached_result("pendulum", base_scene, params, kStepsPerRun,
+                                    ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchPendulumSoA(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_pendulum(1);
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        RowSOA rows = build_soa(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_result("pendulum", base_scene, params, kStepsPerRun,
+                                 ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchChainCached(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_chain_64();
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_cached_result("chain_64", base_scene, params, kStepsPerRun,
+                                    ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchChainSoA(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_chain_64();
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        RowSOA rows = build_soa(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_result("chain_64", base_scene, params, kStepsPerRun,
+                                 ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchRopeCached(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_rope_256();
+  SolverParams params;
+  params.beta = 0.0;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 180.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        build_distance_joint_rows(bodies, joints, params.dt);
+        solve_scalar_cached(bodies, contacts, joints, params);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_cached_result("rope_256", base_scene, params, kStepsPerRun,
+                                    ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchRopeSoA(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_rope_256();
+  SolverParams params;
+  params.beta = 0.0;
+  params.slop = 0.0;
+  params.restitution = 0.0;
+  params.iterations = 40;
+  params.dt = 1.0 / 180.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) {
+        RowSOA rows = build_soa(bodies, contacts, params);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_result("rope_256", base_scene, params, kStepsPerRun,
                                  ms_per_step));
     recorded = true;
   }
@@ -399,13 +636,13 @@ void write_results_csv() {
   const bool exists = std::filesystem::exists(path);
   std::ofstream out(path, std::ios::app);
   if (!exists || out.tellp() == 0) {
-    out << "scene,solver,iterations,N_bodies,N_contacts,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency\n";
+    out << "scene,solver,iterations,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,joint_Linf\n";
   }
   for (const BenchmarkResult& r : g_results) {
     out << r.scene << ',' << r.solver << ',' << r.iterations << ',' << r.bodies << ','
-        << r.contacts << ',' << r.ms_per_step << ',' << r.drift_max << ','
-        << r.penetration_linf << ',' << r.energy_drift << ',' << r.cone_consistency
-        << '\n';
+        << r.contacts << ',' << r.joints << ',' << r.ms_per_step << ',' << r.drift_max
+        << ',' << r.penetration_linf << ',' << r.energy_drift << ',' << r.cone_consistency
+        << ',' << r.joint_Linf << '\n';
   }
 }
 
@@ -416,13 +653,13 @@ void print_results_table() {
   std::cout << "\nBenchmark Summary\n";
   std::cout << std::left << std::setw(24) << "scene" << std::setw(16) << "solver"
             << std::setw(12) << "ms/step" << std::setw(14) << "drift" << std::setw(16)
-            << "energy" << std::setw(18) << "cone" << '\n';
+            << "energy" << std::setw(18) << "cone" << std::setw(14) << "joint" << '\n';
   for (const BenchmarkResult& r : g_results) {
     std::cout << std::left << std::setw(24) << r.scene << std::setw(16) << r.solver
               << std::setw(12) << std::fixed << std::setprecision(3) << r.ms_per_step
               << std::setw(14) << std::scientific << std::setprecision(3)
               << r.drift_max << std::setw(16) << r.energy_drift << std::setw(18)
-              << r.cone_consistency << '\n';
+              << r.cone_consistency << std::setw(14) << r.joint_Linf << '\n';
   }
   std::cout << std::defaultfloat;
 }
@@ -438,6 +675,12 @@ BENCHMARK(BenchSpheresCloudSoA8192)->UseManualTime();
 BENCHMARK(BenchBoxStackBaseline)->UseManualTime();
 BENCHMARK(BenchBoxStackCached)->UseManualTime();
 BENCHMARK(BenchBoxStackSoA)->UseManualTime();
+BENCHMARK(BenchPendulumCached)->UseManualTime();
+BENCHMARK(BenchPendulumSoA)->UseManualTime();
+BENCHMARK(BenchChainCached)->UseManualTime();
+BENCHMARK(BenchChainSoA)->UseManualTime();
+BENCHMARK(BenchRopeCached)->UseManualTime();
+BENCHMARK(BenchRopeSoA)->UseManualTime();
 
 int main(int argc, char** argv) {
   benchmark::Initialize(&argc, argv);

@@ -47,6 +47,82 @@ Scene make_two_spheres_head_on() {
   return scene;
 }
 
+Scene make_pendulum(int links) {
+  Scene scene;
+  if (links < 1) {
+    links = 1;
+  }
+
+  RigidBody pivot;
+  pivot.invMass = 0.0;
+  pivot.invInertiaLocal = math::Mat3();
+  pivot.syncDerived();
+  scene.bodies.push_back(pivot);
+
+  const double spacing = 1.0;
+  for (int i = 0; i < links; ++i) {
+    const double y = -(i + 1) * spacing;
+    RigidBody link = make_dynamic_body(math::Vec3(0.25 * i, y, 0.0));
+    link.v = math::Vec3(0.0, 0.0, 0.5);
+    const int body_index = static_cast<int>(scene.bodies.size());
+    scene.bodies.push_back(link);
+
+    DistanceJoint joint;
+    joint.a = body_index - 1;
+    joint.b = body_index;
+    joint.la = math::Vec3();
+    joint.lb = math::Vec3();
+    joint.rest = spacing;
+    joint.compliance = 0.0;
+    joint.beta = 0.2;
+    scene.joints.push_back(joint);
+  }
+
+  return scene;
+}
+
+Scene make_chain_64() {
+  Scene scene = make_pendulum(64);
+  for (DistanceJoint& joint : scene.joints) {
+    joint.compliance = 1e-8;
+    joint.beta = 0.2;
+  }
+  return scene;
+}
+
+Scene make_rope_256() {
+  Scene scene;
+
+  RigidBody anchor;
+  anchor.invMass = 0.0;
+  anchor.invInertiaLocal = math::Mat3();
+  anchor.syncDerived();
+  scene.bodies.push_back(anchor);
+
+  const double spacing = 0.5;
+  const int count = 256;
+  for (int i = 0; i < count; ++i) {
+    const double x = (i + 1) * spacing;
+    RigidBody node = make_dynamic_body(math::Vec3(x, 0.0, 0.0));
+    node.v = math::Vec3(0.0, 0.0, 0.0);
+    const int body_index = static_cast<int>(scene.bodies.size());
+    scene.bodies.push_back(node);
+
+    DistanceJoint joint;
+    joint.a = body_index - 1;
+    joint.b = body_index;
+    joint.la = math::Vec3();
+    joint.lb = math::Vec3();
+    joint.rest = spacing;
+    joint.compliance = 0.0;
+    joint.beta = 0.0;
+    joint.rope = true;
+    scene.joints.push_back(joint);
+  }
+
+  return scene;
+}
+
 Scene make_spheres_box_cloud(int N) {
   Scene scene;
   scene.bodies.reserve(static_cast<std::size_t>(N) + 1);

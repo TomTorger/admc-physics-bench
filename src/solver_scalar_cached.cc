@@ -27,6 +27,7 @@ Vec3 generate_t1(const Vec3& n) {
 
 void solve_scalar_cached(std::vector<RigidBody>& bodies,
                          std::vector<Contact>& contacts,
+                         std::vector<DistanceJoint>& joints,
                          const SolverParams& params) {
   const int iterations = std::max(1, params.iterations);
 
@@ -100,6 +101,63 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     }
   }
 
+  build_distance_joint_rows(bodies, joints, params.dt);
+
+  std::vector<double> joint_k(joints.size(), 1.0);
+  std::vector<double> joint_gamma(joints.size(), 0.0);
+  std::vector<double> joint_bias(joints.size(), 0.0);
+  std::vector<uint8_t> joint_valid(joints.size(), 0);
+
+  const double dt_sq = (params.dt > math::kEps) ? (params.dt * params.dt) : 0.0;
+  const double inv_dt = (params.dt > math::kEps) ? (1.0 / params.dt) : 0.0;
+
+  for (std::size_t i = 0; i < joints.size(); ++i) {
+    DistanceJoint& j = joints[i];
+    if (j.a < 0 || j.b < 0 || j.a >= static_cast<int>(bodies.size()) ||
+        j.b >= static_cast<int>(bodies.size())) {
+      j.jd = 0.0;
+      continue;
+    }
+
+    Vec3 dir = math::normalize_safe(j.d_hat);
+    if (math::length2(dir) <= math::kEps * math::kEps) {
+      dir = Vec3(1.0, 0.0, 0.0);
+    }
+    j.d_hat = dir;
+
+    const RigidBody& A = bodies[static_cast<std::size_t>(j.a)];
+    const RigidBody& B = bodies[static_cast<std::size_t>(j.b)];
+
+    const Vec3 ra_cross_d = math::cross(j.ra, dir);
+    const Vec3 rb_cross_d = math::cross(j.rb, dir);
+
+    double k = A.invMass + B.invMass;
+    k += math::dot(ra_cross_d, A.invInertiaWorld * ra_cross_d);
+    k += math::dot(rb_cross_d, B.invInertiaWorld * rb_cross_d);
+    if (k <= math::kEps) {
+      k = 1.0;
+    }
+
+    double gamma = 0.0;
+    if (dt_sq > 0.0) {
+      gamma = j.compliance / dt_sq;
+    }
+
+    double bias = 0.0;
+    if (params.dt > math::kEps) {
+      bias = -(j.beta * inv_dt) * j.C;
+    }
+
+    joint_valid[i] = 1;
+    joint_k[i] = k;
+    joint_gamma[i] = gamma;
+    joint_bias[i] = bias;
+
+    if (!params.warm_start) {
+      j.jd = 0.0;
+    }
+  }
+
   if (params.warm_start) {
     for (Contact& c : contacts) {
       if (c.a < 0 || c.b < 0 || c.a >= static_cast<int>(bodies.size()) ||
@@ -114,6 +172,21 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       }
       A.applyImpulse(-impulse, c.ra);
       B.applyImpulse(impulse, c.rb);
+    }
+
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      if (!joint_valid[i]) {
+        continue;
+      }
+      DistanceJoint& j = joints[i];
+      if (std::fabs(j.jd) <= math::kEps) {
+        continue;
+      }
+      RigidBody& A = bodies[j.a];
+      RigidBody& B = bodies[j.b];
+      const Vec3 impulse = j.d_hat * j.jd;
+      A.applyImpulse(-impulse, j.ra);
+      B.applyImpulse(impulse, j.rb);
     }
   }
 
@@ -186,9 +259,51 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
         B.applyImpulse(impulse_t, c.rb);
       }
     }
+
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      if (!joint_valid[i]) {
+        continue;
+      }
+
+      DistanceJoint& j = joints[i];
+      RigidBody& A = bodies[j.a];
+      RigidBody& B = bodies[j.b];
+
+      const Vec3 va = A.v + math::cross(A.w, j.ra);
+      const Vec3 vb = B.v + math::cross(B.w, j.rb);
+      const double v_rel_d = math::dot(j.d_hat, vb - va);
+
+      const double denom = joint_k[i] + joint_gamma[i];
+      if (denom <= math::kEps) {
+        continue;
+      }
+
+      double j_new = j.jd - (v_rel_d + joint_bias[i]) / denom;
+      if (j.rope && j_new < 0.0) {
+        j_new = 0.0;
+      }
+
+      const double applied = j_new - j.jd;
+      j.jd = j_new;
+
+      if (std::fabs(applied) > math::kEps) {
+        const Vec3 impulse = applied * j.d_hat;
+        A.applyImpulse(-impulse, j.ra);
+        B.applyImpulse(impulse, j.rb);
+      }
+    }
   }
 
   for (RigidBody& body : bodies) {
     body.integrate(params.dt);
   }
 }
+
+void solve_scalar_cached(std::vector<RigidBody>& bodies,
+                         std::vector<Contact>& contacts,
+                         const SolverParams& params) {
+  static std::vector<DistanceJoint> empty_joints;
+  empty_joints.clear();
+  solve_scalar_cached(bodies, contacts, empty_joints, params);
+}
+

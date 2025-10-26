@@ -134,3 +134,11 @@ double cone_consistency(const std::vector<Contact>& contacts) {
   return static_cast<double>(satisfied) / static_cast<double>(considered);
 }
 
+double joint_error_Linf(const std::vector<DistanceJoint>& joints) {
+  double max_error = 0.0;
+  for (const DistanceJoint& j : joints) {
+    max_error = std::max(max_error, std::fabs(j.C));
+  }
+  return max_error;
+}
+

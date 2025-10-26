@@ -158,6 +158,7 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
 void solve_scalar_soa(std::vector<RigidBody>& bodies,
                       std::vector<Contact>& contacts,
                       RowSOA& rows,
+                      JointSOA& joints,
                       const SolverParams& params) {
   const int iterations = std::max(1, params.iterations);
 
@@ -169,6 +170,7 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
     std::fill(rows.jn.begin(), rows.jn.end(), 0.0);
     std::fill(rows.jt1.begin(), rows.jt1.end(), 0.0);
     std::fill(rows.jt2.begin(), rows.jt2.end(), 0.0);
+    std::fill(joints.j.begin(), joints.j.end(), 0.0);
   } else {
     for (std::size_t i = 0; i < rows.size(); ++i) {
       const int ia = rows.a[i];
@@ -188,6 +190,25 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       }
       A.applyImpulse(-impulse, rows.ra[i]);
       B.applyImpulse(impulse, rows.rb[i]);
+    }
+
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      const int ia = joints.a[i];
+      const int ib = joints.b[i];
+      if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
+          ib >= static_cast<int>(bodies.size())) {
+        continue;
+      }
+
+      if (std::fabs(joints.j[i]) <= math::kEps) {
+        continue;
+      }
+
+      RigidBody& A = bodies[ia];
+      RigidBody& B = bodies[ib];
+      const Vec3 impulse = joints.d[i] * joints.j[i];
+      A.applyImpulse(-impulse, joints.ra[i]);
+      B.applyImpulse(impulse, joints.rb[i]);
     }
   }
 
@@ -261,6 +282,40 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
         B.applyImpulse(impulse_t, rows.rb[i]);
       }
     }
+
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      const int ia = joints.a[i];
+      const int ib = joints.b[i];
+      if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
+          ib >= static_cast<int>(bodies.size())) {
+        continue;
+      }
+
+      const double denom = joints.k[i] + joints.gamma[i];
+      if (denom <= math::kEps) {
+        continue;
+      }
+
+      RigidBody& A = bodies[ia];
+      RigidBody& B = bodies[ib];
+      const Vec3 va = A.v + math::cross(A.w, joints.ra[i]);
+      const Vec3 vb = B.v + math::cross(B.w, joints.rb[i]);
+      const double v_rel_d = math::dot(joints.d[i], vb - va);
+
+      double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
+      if (joints.rope[i] && j_new < 0.0) {
+        j_new = 0.0;
+      }
+
+      const double applied = j_new - joints.j[i];
+      joints.j[i] = j_new;
+
+      if (std::fabs(applied) > math::kEps) {
+        const Vec3 impulse = applied * joints.d[i];
+        A.applyImpulse(-impulse, joints.ra[i]);
+        B.applyImpulse(impulse, joints.rb[i]);
+      }
+    }
   }
 
   for (std::size_t i = 0; i < rows.size(); ++i) {
@@ -297,4 +352,24 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   for (RigidBody& body : bodies) {
     body.integrate(params.dt);
   }
+}
+
+void solve_scalar_soa(std::vector<RigidBody>& bodies,
+                      std::vector<Contact>& contacts,
+                      RowSOA& rows,
+                      const SolverParams& params) {
+  static JointSOA empty_joints;
+  empty_joints.a.clear();
+  empty_joints.b.clear();
+  empty_joints.d.clear();
+  empty_joints.ra.clear();
+  empty_joints.rb.clear();
+  empty_joints.k.clear();
+  empty_joints.gamma.clear();
+  empty_joints.bias.clear();
+  empty_joints.j.clear();
+  empty_joints.rope.clear();
+  empty_joints.C.clear();
+  empty_joints.indices.clear();
+  solve_scalar_soa(bodies, contacts, rows, empty_joints, params);
 }
