@@ -1,0 +1,37 @@
+name: CI + Quick Bench
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 2
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Quick Bench (short run)
+        run: |
+          chmod +x scripts/ci_check.sh
+          bash scripts/ci_check.sh
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            results/*.csv
+            build/bench/*.log
+          if-no-files-found: ignore
