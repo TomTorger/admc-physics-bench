@@ -41,7 +41,6 @@ struct Contact {
   Vec3 rb;     //!< Offset from body b COM to contact.
   double e = 0.0;
   double mu = 0.0;
-  double penetration = 0.0; //!< Constraint value (<=0 indicates penetration).
   double bias = 0.0;
   double jn = 0.0; //!< Warm-start accumulator for normal impulse.
 };
