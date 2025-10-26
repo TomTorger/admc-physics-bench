@@ -17,7 +17,7 @@ endif()
 
 add_library(core
   src/math.hpp src/types.hpp
-  src/contact_gen.cc src/scenes.cc src/metrics.cc
+  src/contact_gen.cc src/scenes.cc src/metrics.cc src/joints.cc
   src/solver_baseline_vec.cc src/solver_scalar_cached.cc src/solver_scalar_soa.cc)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
@@ -35,10 +35,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_sanity PRIVATE core)
   add_executable(test_solvers tests/test_solvers.cc)
   target_link_libraries(test_solvers PRIVATE core)
+  add_executable(test_joints tests/test_joints.cc)
+  target_link_libraries(test_joints PRIVATE core)
 
-  add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers)
+  add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers test_joints)
 
   add_test(NAME test_invariants COMMAND test_invariants)
   add_test(NAME test_sanity COMMAND test_sanity)
   add_test(NAME test_solvers COMMAND test_solvers)
+  add_test(NAME test_joints COMMAND test_joints)
 endif()

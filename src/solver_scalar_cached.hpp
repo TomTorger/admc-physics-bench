@@ -1,5 +1,6 @@
 #pragma once
 
+#include "joints.hpp"
 #include "types.hpp"
 
 #include <vector>
@@ -13,6 +14,11 @@ struct SolverParams {
   double dt = 1.0 / 60.0;
   bool warm_start = true;
 };
+
+void solve_scalar_cached(std::vector<RigidBody>& bodies,
+                         std::vector<Contact>& contacts,
+                         std::vector<DistanceJoint>& joints,
+                         const SolverParams& params);
 
 void solve_scalar_cached(std::vector<RigidBody>& bodies,
                          std::vector<Contact>& contacts,
