@@ -1,3 +1,4 @@
+#include "contact_gen.hpp"
 #include "joints.hpp"
 #include "scenes.hpp"
 #include "solver_scalar_soa.hpp"

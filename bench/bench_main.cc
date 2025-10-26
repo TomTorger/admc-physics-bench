@@ -1,5 +1,12 @@
-#include "benchmark/benchmark.h"
+#ifndef ADMC_HAVE_GBENCH
+#define ADMC_HAVE_GBENCH 0
+#endif
 
+#if ADMC_HAVE_GBENCH
+#include "benchmark/benchmark.h"
+#endif
+
+#include "bench_csv_schema.hpp"
 #include "contact_gen.hpp"
 #include "joints.hpp"
 #include "metrics.hpp"
@@ -18,6 +25,8 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -66,14 +75,19 @@ void record_micro_result(const MicrobenchResult& result) {
   g_micro_results.push_back(result);
 }
 
+void write_results_csv();
+void write_microbench_csv();
+void print_results_table();
+
 struct CliOptions {
   bool run_cli = false;
-  std::string solver = "scalar_soa";
+  bool run_benchmark = false;
+  std::string solver = "auto";
   std::string scene = "two_spheres";
   int iterations = 10;
-  int steps = kStepsPerRun;
+  int steps = 30;
   double dt = 1.0 / 60.0;
-  int threads = static_cast<int>(std::thread::hardware_concurrency());
+  int threads = 1;
   std::string csv_path = "results/results.csv";
 };
 
@@ -96,10 +110,14 @@ double parse_double_default(const std::string& value, double fallback) {
 bool make_scene_by_name(const std::string& name, Scene* scene) {
   if (name == "two_spheres") {
     *scene = make_two_spheres_head_on();
+  } else if (name == "spheres_cloud_1024") {
+    *scene = make_spheres_box_cloud(1024);
   } else if (name == "spheres_cloud_4096") {
     *scene = make_spheres_box_cloud(4096);
   } else if (name == "spheres_cloud_8192") {
     *scene = make_spheres_box_cloud(8192);
+  } else if (name == "box_stack_4") {
+    *scene = make_box_stack(4);
   } else if (name == "box_stack") {
     *scene = make_box_stack(8);
   } else if (name == "pendulum") {
@@ -138,16 +156,156 @@ CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthro
       opts.run_cli = true;
       opts.threads = std::max(1, parse_int_default(arg.substr(10), opts.threads));
     } else if (arg.rfind("--csv=", 0) == 0) {
-      opts.run_cli = true;
       opts.csv_path = arg.substr(6);
+    } else if (arg == "--benchmark") {
+      opts.run_benchmark = true;
     } else {
       passthrough.push_back(argv[i]);
     }
   }
-  if (opts.threads <= 0) {
-    opts.threads = 1;
-  }
   return opts;
+}
+
+void print_run_summary(const BenchmarkResult& result) {
+  std::cout << "scene=" << result.scene << ", solver=" << result.solver
+            << ", steps=" << result.steps << ", ms_per_step=" << std::fixed
+            << std::setprecision(3) << result.ms_per_step << std::defaultfloat
+            << ", drift_max=" << result.drift_max << ", contacts="
+            << result.contacts << "\n";
+}
+
+std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
+                                               const std::string& scene_name,
+                                               const Scene& base_scene,
+                                               int iterations,
+                                               int steps,
+                                               double dt,
+                                               int threads) {
+  const int safe_iterations = std::max(1, iterations);
+  const int safe_steps = std::max(1, steps);
+  const int safe_threads = std::max(1, threads);
+
+  std::string normalized = solver_name;
+  if (normalized == "scalar_cached") {
+    normalized = "cached";
+  } else if (normalized == "scalar_soa" || normalized == "soa_simd" ||
+             normalized == "soa_mt") {
+    normalized = "soa";
+  } else if (normalized == "baseline_vec") {
+    normalized = "baseline";
+  }
+
+  std::vector<RigidBody> bodies = base_scene.bodies;
+  std::vector<Contact> contacts = base_scene.contacts;
+  std::vector<DistanceJoint> joints = base_scene.joints;
+  const std::vector<RigidBody> pre = bodies;
+
+  const auto start = std::chrono::steady_clock::now();
+
+  if (normalized == "baseline") {
+    BaselineParams params;
+    params.iterations = safe_iterations;
+    params.dt = dt;
+    for (int step = 0; step < safe_steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      solve_baseline(bodies, contacts, params);
+    }
+  } else if (normalized == "cached") {
+    SolverParams params;
+    params.iterations = safe_iterations;
+    params.dt = dt;
+    for (int step = 0; step < safe_steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      build_distance_joint_rows(bodies, joints, params.dt);
+      solve_scalar_cached(bodies, contacts, joints, params);
+    }
+    build_distance_joint_rows(bodies, joints, params.dt);
+  } else if (normalized == "soa") {
+    SolverParams params;
+    params.iterations = safe_iterations;
+    params.dt = dt;
+    for (int step = 0; step < safe_steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      RowSOA rows = build_soa(bodies, contacts, params);
+      solve_scalar_soa(bodies, contacts, rows, params);
+    }
+  } else {
+    std::cerr << "Unknown solver: " << solver_name << "\n";
+    return std::nullopt;
+  }
+
+  const auto end = std::chrono::steady_clock::now();
+  const double total_seconds =
+      std::chrono::duration<double>(end - start).count();
+  const double ms_per_step = safe_steps > 0
+                                 ? (total_seconds / static_cast<double>(safe_steps)) * 1e3
+                                 : 0.0;
+
+  BenchmarkResult result;
+  result.scene = scene_name;
+  result.solver = normalized;
+  result.iterations = safe_iterations;
+  result.steps = safe_steps;
+  result.dt = dt;
+  result.bodies = base_scene.bodies.size();
+  result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
+  result.ms_per_step = ms_per_step;
+  result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
+  result.penetration_linf = constraint_penetration_Linf(contacts);
+  result.energy_drift = energy_drift(pre, bodies);
+  result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(joints);
+  result.simd = (normalized == "soa");
+  result.threads = (normalized == "soa") ? safe_threads : 1;
+  return result;
+}
+
+void run_default_suite(const std::string& csv_path) {
+  struct QuickCase {
+    const char* scene;
+    const char* solver;
+    int iterations;
+    int steps;
+  };
+
+  constexpr double kDefaultDt = 1.0 / 60.0;
+  const QuickCase cases[] = {
+      {"two_spheres", "baseline", 10, 10},
+      {"two_spheres", "cached", 10, 10},
+      {"two_spheres", "soa", 10, 10},
+      {"spheres_cloud_1024", "baseline", 10, 30},
+      {"spheres_cloud_1024", "cached", 10, 30},
+      {"spheres_cloud_1024", "soa", 10, 30},
+      {"box_stack_4", "baseline", 10, 30},
+      {"box_stack_4", "cached", 10, 30},
+      {"box_stack_4", "soa", 10, 30},
+  };
+
+  std::vector<BenchmarkResult> results;
+  results.reserve(std::size(cases));
+
+  for (const QuickCase& qc : cases) {
+    Scene scene;
+    if (!make_scene_by_name(qc.scene, &scene)) {
+      std::cerr << "Skipping unknown scene: " << qc.scene << "\n";
+      continue;
+    }
+    auto maybe = run_solver_case(qc.solver, qc.scene, scene, qc.iterations,
+                                 qc.steps, kDefaultDt, 1);
+    if (!maybe.has_value()) {
+      continue;
+    }
+    results.push_back(*maybe);
+    print_run_summary(results.back());
+  }
+
+  if (!results.empty()) {
+    g_results = results;
+    g_results_csv_path = csv_path;
+    write_results_csv();
+    g_results.clear();
+  }
 }
 
 bool run_cli_mode(const CliOptions& opts) {
@@ -160,94 +318,44 @@ bool run_cli_mode(const CliOptions& opts) {
   const int steps = std::max(1, opts.steps);
   const int iterations = std::max(1, opts.iterations);
   const double dt = opts.dt;
+  const int threads = std::max(1, opts.threads);
 
-  std::vector<RigidBody> bodies = base_scene.bodies;
-  std::vector<Contact> contacts = base_scene.contacts;
-  std::vector<DistanceJoint> joints = base_scene.joints;
-  const std::vector<RigidBody> pre = bodies;
-
-  const auto start = std::chrono::steady_clock::now();
-
-  if (opts.solver == "baseline") {
-    BaselineParams params;
-    params.iterations = iterations;
-    params.dt = dt;
-    for (int step = 0; step < steps; ++step) {
-      build_contact_offsets_and_bias(bodies, contacts, params);
-      solve_baseline(bodies, contacts, params);
-    }
-  } else if (opts.solver == "cached") {
-    SolverParams params;
-    params.iterations = iterations;
-    params.dt = dt;
-    for (int step = 0; step < steps; ++step) {
-      build_contact_offsets_and_bias(bodies, contacts, params);
-      build_distance_joint_rows(bodies, joints, params.dt);
-      solve_scalar_cached(bodies, contacts, joints, params);
-    }
-    build_distance_joint_rows(bodies, joints, params.dt);
-  } else if (opts.solver == "soa" || opts.solver == "soa_simd" ||
-             opts.solver == "soa_mt") {
-    SoaParams params;
-    params.iterations = iterations;
-    params.dt = dt;
-    params.use_simd = (opts.solver != "soa");
-    params.use_threads = (opts.solver == "soa_mt");
-    params.thread_count = std::max(1, opts.threads);
-    for (int step = 0; step < steps; ++step) {
-      build_contact_offsets_and_bias(bodies, contacts, params);
-      RowSOA rows = build_soa(bodies, contacts, params);
-      build_distance_joint_rows(bodies, joints, params.dt);
-      JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
-      solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
-      scatter_joint_impulses(joint_rows, joints);
-    }
-    build_distance_joint_rows(bodies, joints, params.dt);
+  std::vector<std::string> solvers;
+  if (opts.solver == "auto") {
+    solvers = {"baseline", "cached", "soa"};
   } else {
-    std::cerr << "Unknown solver: " << opts.solver << "\n";
+    solvers.push_back(opts.solver);
+  }
+
+  std::vector<BenchmarkResult> results;
+  results.reserve(solvers.size());
+
+  for (const std::string& solver_name : solvers) {
+    auto maybe =
+        run_solver_case(solver_name, opts.scene, base_scene, iterations, steps,
+                        dt, threads);
+    if (!maybe.has_value()) {
+      std::cerr << "Skipping solver: " << solver_name << "\n";
+      continue;
+    }
+    results.push_back(*maybe);
+    print_run_summary(results.back());
+  }
+
+  if (results.empty()) {
+    std::cerr << "No runs executed.\n";
     return false;
   }
 
-  const auto end = std::chrono::steady_clock::now();
-  const double total_seconds = std::chrono::duration<double>(end - start).count();
-  const double ms_per_step = (steps > 0)
-                                 ? (total_seconds / static_cast<double>(steps)) * 1e3
-                                 : 0.0;
-
-  BenchmarkResult result;
-  result.scene = opts.scene;
-  result.solver = opts.solver;
-  result.iterations = iterations;
-  result.steps = steps;
-  result.dt = dt;
-  result.bodies = base_scene.bodies.size();
-  result.contacts = base_scene.contacts.size();
-  result.joints = base_scene.joints.size();
-  result.ms_per_step = ms_per_step;
-  result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
-  result.penetration_linf = constraint_penetration_Linf(contacts);
-  result.energy_drift = energy_drift(pre, bodies);
-  result.cone_consistency = cone_consistency(contacts);
-  result.joint_Linf = joint_error_Linf(joints);
-  result.simd = (opts.solver == "soa_simd" || opts.solver == "soa_mt");
-  result.threads = (opts.solver == "soa_mt") ? std::max(1, opts.threads) : 1;
-
-  g_results.clear();
+  g_results = results;
   g_results_csv_path = opts.csv_path;
-  record_result(result);
   write_results_csv();
-  print_results_table();
-
-  std::cout << "CLI run complete: scene=" << result.scene << ", solver="
-            << result.solver << ", steps=" << result.steps
-            << ", ms_per_step=" << std::fixed << std::setprecision(3)
-            << result.ms_per_step << std::defaultfloat << ", simd="
-            << (result.simd ? "1" : "0") << ", threads=" << result.threads
-            << "\n";
+  g_results.clear();
 
   return true;
 }
 
+#if ADMC_HAVE_GBENCH
 constexpr int kStepsPerRun = 60;
 
 BenchmarkResult run_baseline_result(const std::string& scene_name,
@@ -849,6 +957,8 @@ void BenchRopeSoA(benchmark::State& state) {
   }
 }
 
+#endif  // ADMC_HAVE_GBENCH
+
 void write_results_csv() {
   if (g_results.empty()) {
     return;
@@ -858,9 +968,19 @@ void write_results_csv() {
     std::filesystem::create_directories(path.parent_path());
   }
   const bool exists = std::filesystem::exists(path);
+  bool needs_header = !exists;
+  if (exists) {
+    std::ifstream existing(path);
+    needs_header = !existing.good() ||
+                   existing.peek() == std::ifstream::traits_type::eof();
+  }
   std::ofstream out(path, std::ios::app);
-  if (!exists || out.tellp() == 0) {
-    out << "scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,simd,threads\n";
+  if (!out) {
+    std::cerr << "Failed to open CSV for writing: " << path << "\n";
+    return;
+  }
+  if (needs_header) {
+    out << benchcsv::kHeader << '\n';
   }
   for (const BenchmarkResult& r : g_results) {
     out << r.scene << ',' << r.solver << ',' << r.iterations << ',' << r.steps << ','
@@ -908,6 +1028,7 @@ void write_microbench_csv() {
   }
 }
 
+#if ADMC_HAVE_GBENCH
 void MicrobenchUpdateNormal(benchmark::State& state) {
   const bool use_simd = state.range(0) != 0;
   const int rows = 1024;
@@ -1118,8 +1239,11 @@ void MicrobenchSoaMtScaling(benchmark::State& state) {
     record_micro_result(result);
   }
 }
+#endif  // ADMC_HAVE_GBENCH
 
 }  // namespace
+
+#if ADMC_HAVE_GBENCH
 
 BENCHMARK(BenchSpheresCloudBaseline4096)->UseManualTime();
 BENCHMARK(BenchSpheresCloudCached4096)->UseManualTime();
@@ -1141,6 +1265,8 @@ BENCHMARK(MicrobenchUpdateTangent)->Arg(0)->Arg(1)->UseManualTime();
 BENCHMARK(MicrobenchApplyImpulses)->Arg(0)->Arg(1)->UseManualTime();
 BENCHMARK(MicrobenchSoaMtScaling)->Arg(1)->Arg(2)->Arg(4)->Arg(8)->UseManualTime();
 
+#endif  // ADMC_HAVE_GBENCH
+
 int main(int argc, char** argv) {
   std::vector<char*> passthrough;
   CliOptions opts = parse_cli_options(argc, argv, passthrough);
@@ -1151,13 +1277,24 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  passthrough.push_back(nullptr);
-  int bench_argc = static_cast<int>(passthrough.size()) - 1;
-  benchmark::Initialize(&bench_argc, passthrough.data());
-  benchmark::RunSpecifiedBenchmarks();
-  write_results_csv();
-  write_microbench_csv();
-  print_results_table();
-  benchmark::Shutdown();
+#if ADMC_HAVE_GBENCH
+  if (opts.run_benchmark) {
+    passthrough.push_back(nullptr);
+    int bench_argc = static_cast<int>(passthrough.size()) - 1;
+    benchmark::Initialize(&bench_argc, passthrough.data());
+    benchmark::RunSpecifiedBenchmarks();
+    write_results_csv();
+    write_microbench_csv();
+    print_results_table();
+    benchmark::Shutdown();
+    return 0;
+  }
+#else
+  if (opts.run_benchmark) {
+    std::cerr << "Google Benchmark support disabled at build time; running quick suite instead.\n";
+  }
+#endif
+
+  run_default_suite(opts.csv_path);
   return 0;
 }
