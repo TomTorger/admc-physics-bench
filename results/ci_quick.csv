@@ -1,0 +1,10 @@
+scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,simd,threads
+two_spheres,baseline,10,1,2,1,0,0.002426,0,0,0,1,0,1
+two_spheres,cached,10,1,2,1,0,0.026345,0,0,-4,1,0,1
+two_spheres,soa,10,1,2,1,0,0.076117,0,0,-4,1,1,1
+spheres_cloud_1024,baseline,10,30,1025,3782,0,1.00745,0,10.5,0,1,0,1
+spheres_cloud_1024,cached,10,30,1025,3782,0,1.28076,0,10.5,0,1,0,1
+spheres_cloud_1024,soa,10,30,1025,3782,0,1.7392,0,10.5,0,1,1,1
+box_stack_4,baseline,10,30,5,4,0,0.00158943,0,0.5,0,1,0,1
+box_stack_4,cached,10,30,5,4,0,0.0022976,0,0.5,0,1,0,1
+box_stack_4,soa,10,30,5,4,0,0.00888743,0,0.5,0,1,1,1

@@ -38,7 +38,93 @@ void build_impl(std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
     RigidBody& A = bodies[c.a];
     RigidBody& B = bodies[c.b];
 
-    c.n = math::normalize_safe(c.n);
+    const bool a_static = A.invMass <= math::kEps;
+    const bool b_static = B.invMass <= math::kEps;
+
+    if (c.type == Contact::Type::kUnknown) {
+      if (a_static != b_static) {
+        c.type = Contact::Type::kSpherePlane;
+      } else {
+        c.type = Contact::Type::kSphereSphere;
+      }
+    }
+
+    if (c.type == Contact::Type::kSpherePlane || a_static || b_static) {
+      const bool sphere_is_b = a_static && !b_static;
+      const bool sphere_is_a = !a_static && b_static;
+      const math::Vec3 plane_normal = math::normalize_safe(
+          sphere_is_b ? c.n : (sphere_is_a ? -c.n : c.n));
+
+      double plane_offset = c.plane_offset;
+      if (!std::isfinite(plane_offset) || std::fabs(plane_offset) <= math::kEps) {
+        plane_offset = math::dot(plane_normal, c.p);
+      }
+      c.plane_offset = plane_offset;
+
+      RigidBody& sphere = sphere_is_b ? B : A;
+      double& radius = sphere_is_b ? c.radius_b : c.radius_a;
+      if (radius <= math::kEps) {
+        radius = math::length(c.p - sphere.x);
+      }
+
+      const double dist = math::dot(plane_normal, sphere.x) - plane_offset;
+      c.C = dist - radius;
+
+      const double correction = radius - dist;
+      const math::Vec3 contact_point = sphere.x - correction * plane_normal;
+
+      if (sphere_is_b) {
+        c.n = plane_normal;
+      } else {
+        c.n = -plane_normal;
+      }
+      c.p = contact_point;
+      c.ra = c.p - A.x;
+      c.rb = c.p - B.x;
+    } else {
+      math::Vec3 delta = B.x - A.x;
+      double distance = math::length(delta);
+      if (distance <= 1e-12) {
+        distance = 1e-12;
+        if (math::length2(c.n) <= math::kEps * math::kEps) {
+          c.n = math::Vec3(1.0, 0.0, 0.0);
+        }
+        delta = c.n * distance;
+      }
+      const math::Vec3 normal = math::normalize_safe(delta);
+
+      double& radius_a = c.radius_a;
+      double& radius_b = c.radius_b;
+      if (radius_a <= math::kEps) {
+        radius_a = math::length(c.p - A.x);
+      }
+      if (radius_b <= math::kEps) {
+        radius_b = math::length(c.p - B.x);
+      }
+      if (radius_a <= math::kEps) {
+        radius_a = radius_b;
+      }
+      if (radius_b <= math::kEps) {
+        radius_b = radius_a;
+      }
+
+      c.C = distance - (radius_a + radius_b);
+
+      const double correction =
+          radius_a - 0.5 * (radius_a + radius_b - distance);
+      const math::Vec3 contact_point =
+          0.5 * (A.x + B.x) + correction * normal;
+
+      c.n = normal;
+      c.p = contact_point;
+      c.ra = c.p - A.x;
+      c.rb = c.p - B.x;
+    }
+
+    if (std::fabs(c.C) <= math::kEps) {
+      c.C = 0.0;
+    }
+
     c.t1 = orthonormal_tangent(c.n, c.t1);
     c.t2 = math::normalize_safe(math::cross(c.n, c.t1));
     if (math::length2(c.t2) <= math::kEps * math::kEps) {
@@ -46,18 +132,7 @@ void build_impl(std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
       c.t2 = math::normalize_safe(math::cross(c.n, c.t1));
     }
 
-    c.ra = c.p - A.x;
-    c.rb = c.p - B.x;
-
-    if (std::fabs(c.penetration) <= math::kEps) {
-      c.penetration = 0.0;
-    }
-
-    double depth = 0.0;
-    if (c.penetration < -params.slop) {
-      depth = -c.penetration - params.slop;
-    }
-    c.bias = -params.beta_dt * depth;
+    c.bias = -params.beta_dt * std::max(0.0, -c.C - params.slop);
     c.e = std::max(c.e, params.restitution);
     c.mu = std::max(c.mu, params.mu);
 
