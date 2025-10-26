@@ -44,8 +44,10 @@ void test_frictionless_parity() {
 
   Scene soa_scene = base;
   build_contact_offsets_and_bias(soa_scene.bodies, soa_scene.contacts, solver_params);
-  RowSOA rows = build_soa(soa_scene.bodies, soa_scene.contacts, solver_params);
-  solve_scalar_soa(soa_scene.bodies, soa_scene.contacts, rows, solver_params);
+  SoaParams soa_params;
+  static_cast<SolverParams&>(soa_params) = solver_params;
+  RowSOA rows = build_soa(soa_scene.bodies, soa_scene.contacts, soa_params);
+  solve_scalar_soa(soa_scene.bodies, soa_scene.contacts, rows, soa_params);
 
   const Drift drift = directional_momentum_drift(pre, cached_scene.bodies);
   assert(drift.max_abs < 1e-10);

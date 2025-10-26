@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 namespace {
 using math::Vec3;
@@ -21,11 +22,62 @@ Vec3 orthonormalize(const Vec3& n, const Vec3& t) {
   return tangent;
 }
 
+SoaParams make_soa_params(const SolverParams& params) {
+  SoaParams derived;
+  static_cast<SolverParams&>(derived) = params;
+  if (derived.thread_count <= 0) {
+    derived.thread_count = 1;
+  }
+  if (derived.block_size <= 0) {
+    derived.block_size = 1;
+  }
+  return derived;
+}
+
 }  // namespace
+
+void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
+                           std::vector<Contact>& contacts,
+                           RowSOA& rows,
+                           JointSOA& joints,
+                           const SoaParams& params,
+                           SolverDebugInfo* debug_info);
+
+void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
+                           std::vector<Contact>& contacts,
+                           RowSOA& rows,
+                           const SoaParams& params,
+                           SolverDebugInfo* debug_info);
+
+void solve_scalar_soa_mt(std::vector<RigidBody>& bodies,
+                         std::vector<Contact>& contacts,
+                         RowSOA& rows,
+                         JointSOA& joints,
+                         const SoaParams& params,
+                         SolverDebugInfo* debug_info);
+
+void solve_scalar_soa_mt(std::vector<RigidBody>& bodies,
+                         std::vector<Contact>& contacts,
+                         RowSOA& rows,
+                         const SoaParams& params,
+                         SolverDebugInfo* debug_info);
+
+std::string solver_debug_summary(const SolverDebugInfo& info) {
+  std::ostringstream oss;
+  oss << "invalid_contacts=" << info.invalid_contact_indices
+      << ", invalid_joints=" << info.invalid_joint_indices
+      << ", warmstart_contacts=" << info.warmstart_contact_impulses
+      << ", warmstart_joints=" << info.warmstart_joint_impulses
+      << ", normal_clamps=" << info.normal_impulse_clamps
+      << ", tangent_projections=" << info.tangent_projections
+      << ", rope_clamps=" << info.rope_clamps
+      << ", singular_joint_denoms=" << info.singular_joint_denominators;
+  return oss.str();
+}
 
 RowSOA build_soa(const std::vector<RigidBody>& bodies,
                  const std::vector<Contact>& contacts,
-                 const SolverParams& params) {
+                 const SoaParams& params) {
   RowSOA rows;
   rows.a.reserve(contacts.size());
   rows.b.reserve(contacts.size());
@@ -155,12 +207,23 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
   return rows;
 }
 
-void solve_scalar_soa(std::vector<RigidBody>& bodies,
-                      std::vector<Contact>& contacts,
-                      RowSOA& rows,
-                      JointSOA& joints,
-                      const SolverParams& params) {
+RowSOA build_soa(const std::vector<RigidBody>& bodies,
+                 const std::vector<Contact>& contacts,
+                 const SolverParams& params) {
+  return build_soa(bodies, contacts, make_soa_params(params));
+}
+
+void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
+                             std::vector<Contact>& contacts,
+                             RowSOA& rows,
+                             JointSOA& joints,
+                             const SoaParams& params,
+                             SolverDebugInfo* debug_info) {
   const int iterations = std::max(1, params.iterations);
+
+  if (debug_info) {
+    debug_info->reset();
+  }
 
   for (RigidBody& body : bodies) {
     body.syncDerived();
@@ -177,6 +240,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       const int ib = rows.b[i];
       if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
           ib >= static_cast<int>(bodies.size())) {
+        if (debug_info) {
+          ++debug_info->invalid_contact_indices;
+        }
         continue;
       }
 
@@ -188,6 +254,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       if (math::length2(impulse) <= math::kEps) {
         continue;
       }
+      if (debug_info) {
+        ++debug_info->warmstart_contact_impulses;
+      }
       A.applyImpulse(-impulse, rows.ra[i]);
       B.applyImpulse(impulse, rows.rb[i]);
     }
@@ -197,6 +266,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       const int ib = joints.b[i];
       if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
           ib >= static_cast<int>(bodies.size())) {
+        if (debug_info) {
+          ++debug_info->invalid_joint_indices;
+        }
         continue;
       }
 
@@ -207,6 +279,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       RigidBody& A = bodies[ia];
       RigidBody& B = bodies[ib];
       const Vec3 impulse = joints.d[i] * joints.j[i];
+      if (debug_info) {
+        ++debug_info->warmstart_joint_impulses;
+      }
       A.applyImpulse(-impulse, joints.ra[i]);
       B.applyImpulse(impulse, joints.rb[i]);
     }
@@ -218,6 +293,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       const int ib = rows.b[i];
       if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
           ib >= static_cast<int>(bodies.size())) {
+        if (debug_info) {
+          ++debug_info->invalid_contact_indices;
+        }
         continue;
       }
 
@@ -236,7 +314,11 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
 
       const double delta_jn = (target - v_rel_n) / rows.k_n[i];
       const double jn_old = rows.jn[i];
-      rows.jn[i] = std::max(0.0, rows.jn[i] + delta_jn);
+      const double jn_candidate = rows.jn[i] + delta_jn;
+      if (jn_candidate < 0.0 && debug_info) {
+        ++debug_info->normal_impulse_clamps;
+      }
+      rows.jn[i] = std::max(0.0, jn_candidate);
       const double applied_n = rows.jn[i] - jn_old;
       if (std::fabs(applied_n) > math::kEps) {
         const Vec3 impulse_n = applied_n * rows.n[i];
@@ -266,6 +348,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       double scale = 1.0;
       if (jt_mag > friction_max && jt_mag > math::kEps) {
         scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+        if (debug_info) {
+          ++debug_info->tangent_projections;
+        }
       }
 
       jt1_candidate *= scale;
@@ -288,11 +373,17 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
       const int ib = joints.b[i];
       if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
           ib >= static_cast<int>(bodies.size())) {
+        if (debug_info) {
+          ++debug_info->invalid_joint_indices;
+        }
         continue;
       }
 
       const double denom = joints.k[i] + joints.gamma[i];
       if (denom <= math::kEps) {
+        if (debug_info) {
+          ++debug_info->singular_joint_denominators;
+        }
         continue;
       }
 
@@ -304,6 +395,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
 
       double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
       if (joints.rope[i] && j_new < 0.0) {
+        if (debug_info) {
+          ++debug_info->rope_clamps;
+        }
         j_new = 0.0;
       }
 
@@ -321,6 +415,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   for (std::size_t i = 0; i < rows.size(); ++i) {
     const int idx = rows.indices[i];
     if (idx < 0 || idx >= static_cast<int>(contacts.size())) {
+      if (debug_info) {
+        ++debug_info->invalid_contact_indices;
+      }
       continue;
     }
     Contact& c = contacts[static_cast<std::size_t>(idx)];
@@ -354,10 +451,11 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   }
 }
 
-void solve_scalar_soa(std::vector<RigidBody>& bodies,
-                      std::vector<Contact>& contacts,
-                      RowSOA& rows,
-                      const SolverParams& params) {
+void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
+                             std::vector<Contact>& contacts,
+                             RowSOA& rows,
+                             const SoaParams& params,
+                             SolverDebugInfo* debug_info) {
   static JointSOA empty_joints;
   empty_joints.a.clear();
   empty_joints.b.clear();
@@ -371,5 +469,84 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   empty_joints.rope.clear();
   empty_joints.C.clear();
   empty_joints.indices.clear();
-  solve_scalar_soa(bodies, contacts, rows, empty_joints, params);
+  solve_scalar_soa_scalar(bodies, contacts, rows, empty_joints, params, debug_info);
+}
+
+void solve_scalar_soa(std::vector<RigidBody>& bodies,
+                      std::vector<Contact>& contacts,
+                      RowSOA& rows,
+                      JointSOA& joints,
+                      const SoaParams& params,
+                      SolverDebugInfo* debug_info) {
+  SoaParams effective = params;
+  if (effective.thread_count <= 0) {
+    effective.thread_count = 1;
+  }
+  if (effective.block_size <= 0) {
+    effective.block_size = 1;
+  }
+
+#if defined(ADMC_USE_THREADS)
+  if (effective.use_threads && effective.thread_count > 1) {
+    solve_scalar_soa_mt(bodies, contacts, rows, joints, effective, debug_info);
+    return;
+  }
+#endif
+
+#if defined(ADMC_USE_AVX2) || defined(ADMC_USE_NEON)
+  if (effective.use_simd) {
+    solve_scalar_soa_simd(bodies, contacts, rows, joints, effective, debug_info);
+    return;
+  }
+#endif
+
+  solve_scalar_soa_scalar(bodies, contacts, rows, joints, effective, debug_info);
+}
+
+void solve_scalar_soa(std::vector<RigidBody>& bodies,
+                      std::vector<Contact>& contacts,
+                      RowSOA& rows,
+                      JointSOA& joints,
+                      const SolverParams& params,
+                      SolverDebugInfo* debug_info) {
+  solve_scalar_soa(bodies, contacts, rows, joints, make_soa_params(params),
+                   debug_info);
+}
+
+void solve_scalar_soa(std::vector<RigidBody>& bodies,
+                      std::vector<Contact>& contacts,
+                      RowSOA& rows,
+                      const SoaParams& params,
+                      SolverDebugInfo* debug_info) {
+  SoaParams effective = params;
+  if (effective.thread_count <= 0) {
+    effective.thread_count = 1;
+  }
+  if (effective.block_size <= 0) {
+    effective.block_size = 1;
+  }
+
+#if defined(ADMC_USE_THREADS)
+  if (effective.use_threads && effective.thread_count > 1) {
+    solve_scalar_soa_mt(bodies, contacts, rows, effective, debug_info);
+    return;
+  }
+#endif
+
+#if defined(ADMC_USE_AVX2) || defined(ADMC_USE_NEON)
+  if (effective.use_simd) {
+    solve_scalar_soa_simd(bodies, contacts, rows, effective, debug_info);
+    return;
+  }
+#endif
+
+  solve_scalar_soa_scalar(bodies, contacts, rows, effective, debug_info);
+}
+
+void solve_scalar_soa(std::vector<RigidBody>& bodies,
+                      std::vector<Contact>& contacts,
+                      RowSOA& rows,
+                      const SolverParams& params,
+                      SolverDebugInfo* debug_info) {
+  solve_scalar_soa(bodies, contacts, rows, make_soa_params(params), debug_info);
 }

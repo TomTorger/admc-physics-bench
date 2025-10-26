@@ -3,17 +3,24 @@
 #include "contact_gen.hpp"
 #include "joints.hpp"
 #include "metrics.hpp"
+#include "metrics_micro.hpp"
 #include "scenes.hpp"
 #include "solver_baseline_vec.hpp"
 #include "solver_scalar_cached.hpp"
 #include "solver_scalar_soa.hpp"
+#include "solver_scalar_soa_mt.hpp"
+#include "solver_scalar_soa_simd.hpp"
+#include "soa_pack.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -21,6 +28,8 @@ struct BenchmarkResult {
   std::string scene;
   std::string solver;
   int iterations = 0;
+  int steps = 0;
+  double dt = 0.0;
   std::size_t bodies = 0;
   std::size_t contacts = 0;
   std::size_t joints = 0;
@@ -30,12 +39,213 @@ struct BenchmarkResult {
   double energy_drift = 0.0;
   double cone_consistency = 0.0;
   double joint_Linf = 0.0;
+  bool simd = false;
+  int threads = 1;
 };
 
 std::vector<BenchmarkResult> g_results;
+std::string g_results_csv_path = "results/results.csv";
+
+struct MicrobenchResult {
+  std::string kernel;
+  std::string variant;
+  int lane = 1;
+  int threads = 1;
+  std::size_t rows = 0;
+  double ns_per_row = 0.0;
+};
+
+std::vector<MicrobenchResult> g_micro_results;
+std::string g_micro_csv_path = "results/microbench.csv";
 
 void record_result(const BenchmarkResult& result) {
   g_results.push_back(result);
+}
+
+void record_micro_result(const MicrobenchResult& result) {
+  g_micro_results.push_back(result);
+}
+
+struct CliOptions {
+  bool run_cli = false;
+  std::string solver = "scalar_soa";
+  std::string scene = "two_spheres";
+  int iterations = 10;
+  int steps = kStepsPerRun;
+  double dt = 1.0 / 60.0;
+  int threads = static_cast<int>(std::thread::hardware_concurrency());
+  std::string csv_path = "results/results.csv";
+};
+
+int parse_int_default(const std::string& value, int fallback) {
+  try {
+    return std::stoi(value);
+  } catch (...) {
+    return fallback;
+  }
+}
+
+double parse_double_default(const std::string& value, double fallback) {
+  try {
+    return std::stod(value);
+  } catch (...) {
+    return fallback;
+  }
+}
+
+bool make_scene_by_name(const std::string& name, Scene* scene) {
+  if (name == "two_spheres") {
+    *scene = make_two_spheres_head_on();
+  } else if (name == "spheres_cloud_4096") {
+    *scene = make_spheres_box_cloud(4096);
+  } else if (name == "spheres_cloud_8192") {
+    *scene = make_spheres_box_cloud(8192);
+  } else if (name == "box_stack") {
+    *scene = make_box_stack(8);
+  } else if (name == "pendulum") {
+    *scene = make_pendulum(1);
+  } else if (name == "chain_64") {
+    *scene = make_chain_64();
+  } else if (name == "rope_256") {
+    *scene = make_rope_256();
+  } else {
+    return false;
+  }
+  return true;
+}
+
+CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthrough) {
+  CliOptions opts;
+  passthrough.push_back(argv[0]);
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg(argv[i]);
+    if (arg.rfind("--solver=", 0) == 0) {
+      opts.run_cli = true;
+      opts.solver = arg.substr(9);
+    } else if (arg.rfind("--scene=", 0) == 0) {
+      opts.run_cli = true;
+      opts.scene = arg.substr(8);
+    } else if (arg.rfind("--iters=", 0) == 0) {
+      opts.run_cli = true;
+      opts.iterations = std::max(1, parse_int_default(arg.substr(8), opts.iterations));
+    } else if (arg.rfind("--steps=", 0) == 0) {
+      opts.run_cli = true;
+      opts.steps = std::max(1, parse_int_default(arg.substr(8), opts.steps));
+    } else if (arg.rfind("--dt=", 0) == 0) {
+      opts.run_cli = true;
+      opts.dt = parse_double_default(arg.substr(5), opts.dt);
+    } else if (arg.rfind("--threads=", 0) == 0) {
+      opts.run_cli = true;
+      opts.threads = std::max(1, parse_int_default(arg.substr(10), opts.threads));
+    } else if (arg.rfind("--csv=", 0) == 0) {
+      opts.run_cli = true;
+      opts.csv_path = arg.substr(6);
+    } else {
+      passthrough.push_back(argv[i]);
+    }
+  }
+  if (opts.threads <= 0) {
+    opts.threads = 1;
+  }
+  return opts;
+}
+
+bool run_cli_mode(const CliOptions& opts) {
+  Scene base_scene;
+  if (!make_scene_by_name(opts.scene, &base_scene)) {
+    std::cerr << "Unknown scene: " << opts.scene << "\n";
+    return false;
+  }
+
+  const int steps = std::max(1, opts.steps);
+  const int iterations = std::max(1, opts.iterations);
+  const double dt = opts.dt;
+
+  std::vector<RigidBody> bodies = base_scene.bodies;
+  std::vector<Contact> contacts = base_scene.contacts;
+  std::vector<DistanceJoint> joints = base_scene.joints;
+  const std::vector<RigidBody> pre = bodies;
+
+  const auto start = std::chrono::steady_clock::now();
+
+  if (opts.solver == "baseline") {
+    BaselineParams params;
+    params.iterations = iterations;
+    params.dt = dt;
+    for (int step = 0; step < steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      solve_baseline(bodies, contacts, params);
+    }
+  } else if (opts.solver == "cached") {
+    SolverParams params;
+    params.iterations = iterations;
+    params.dt = dt;
+    for (int step = 0; step < steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      build_distance_joint_rows(bodies, joints, params.dt);
+      solve_scalar_cached(bodies, contacts, joints, params);
+    }
+    build_distance_joint_rows(bodies, joints, params.dt);
+  } else if (opts.solver == "soa" || opts.solver == "soa_simd" ||
+             opts.solver == "soa_mt") {
+    SoaParams params;
+    params.iterations = iterations;
+    params.dt = dt;
+    params.use_simd = (opts.solver != "soa");
+    params.use_threads = (opts.solver == "soa_mt");
+    params.thread_count = std::max(1, opts.threads);
+    for (int step = 0; step < steps; ++step) {
+      build_contact_offsets_and_bias(bodies, contacts, params);
+      RowSOA rows = build_soa(bodies, contacts, params);
+      build_distance_joint_rows(bodies, joints, params.dt);
+      JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+      solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+      scatter_joint_impulses(joint_rows, joints);
+    }
+    build_distance_joint_rows(bodies, joints, params.dt);
+  } else {
+    std::cerr << "Unknown solver: " << opts.solver << "\n";
+    return false;
+  }
+
+  const auto end = std::chrono::steady_clock::now();
+  const double total_seconds = std::chrono::duration<double>(end - start).count();
+  const double ms_per_step = (steps > 0)
+                                 ? (total_seconds / static_cast<double>(steps)) * 1e3
+                                 : 0.0;
+
+  BenchmarkResult result;
+  result.scene = opts.scene;
+  result.solver = opts.solver;
+  result.iterations = iterations;
+  result.steps = steps;
+  result.dt = dt;
+  result.bodies = base_scene.bodies.size();
+  result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
+  result.ms_per_step = ms_per_step;
+  result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
+  result.penetration_linf = constraint_penetration_Linf(contacts);
+  result.energy_drift = energy_drift(pre, bodies);
+  result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(joints);
+  result.simd = (opts.solver == "soa_simd" || opts.solver == "soa_mt");
+  result.threads = (opts.solver == "soa_mt") ? std::max(1, opts.threads) : 1;
+
+  g_results.clear();
+  g_results_csv_path = opts.csv_path;
+  record_result(result);
+  write_results_csv();
+  print_results_table();
+
+  std::cout << "CLI run complete: scene=" << result.scene << ", solver="
+            << result.solver << ", steps=" << result.steps
+            << ", ms_per_step=" << std::fixed << std::setprecision(3)
+            << result.ms_per_step << std::defaultfloat << ", simd="
+            << (result.simd ? "1" : "0") << ", threads=" << result.threads
+            << "\n";
+
+  return true;
 }
 
 constexpr int kStepsPerRun = 60;
@@ -56,6 +266,8 @@ BenchmarkResult run_baseline_result(const std::string& scene_name,
   result.scene = scene_name;
   result.solver = "baseline_vec";
   result.iterations = params.iterations;
+  result.steps = steps;
+  result.dt = params.dt;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
   result.joints = base_scene.joints.size();
@@ -65,6 +277,8 @@ BenchmarkResult run_baseline_result(const std::string& scene_name,
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
   result.joint_Linf = joint_error_Linf(base_scene.joints);
+  result.simd = false;
+  result.threads = 1;
   return result;
 }
 
@@ -87,6 +301,8 @@ BenchmarkResult run_cached_result(const std::string& scene_name,
   result.scene = scene_name;
   result.solver = "scalar_cached";
   result.iterations = params.iterations;
+  result.steps = steps;
+  result.dt = params.dt;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
   result.joints = base_scene.joints.size();
@@ -96,6 +312,8 @@ BenchmarkResult run_cached_result(const std::string& scene_name,
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
   result.joint_Linf = joint_error_Linf(joints);
+  result.simd = false;
+  result.threads = 1;
   return result;
 }
 
@@ -121,6 +339,8 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
   result.scene = scene_name;
   result.solver = "scalar_soa";
   result.iterations = params.iterations;
+  result.steps = steps;
+  result.dt = params.dt;
   result.bodies = base_scene.bodies.size();
   result.contacts = base_scene.contacts.size();
   result.joints = base_scene.joints.size();
@@ -130,6 +350,8 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
   result.joint_Linf = joint_error_Linf(joints);
+  result.simd = false;
+  result.threads = 1;
   return result;
 }
 
@@ -631,18 +853,21 @@ void write_results_csv() {
   if (g_results.empty()) {
     return;
   }
-  std::filesystem::create_directories("results");
-  const std::string path = "results/results.csv";
+  const std::filesystem::path path(g_results_csv_path);
+  if (!path.parent_path().empty()) {
+    std::filesystem::create_directories(path.parent_path());
+  }
   const bool exists = std::filesystem::exists(path);
   std::ofstream out(path, std::ios::app);
   if (!exists || out.tellp() == 0) {
-    out << "scene,solver,iterations,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,joint_Linf\n";
+    out << "scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,simd,threads\n";
   }
   for (const BenchmarkResult& r : g_results) {
-    out << r.scene << ',' << r.solver << ',' << r.iterations << ',' << r.bodies << ','
-        << r.contacts << ',' << r.joints << ',' << r.ms_per_step << ',' << r.drift_max
-        << ',' << r.penetration_linf << ',' << r.energy_drift << ',' << r.cone_consistency
-        << ',' << r.joint_Linf << '\n';
+    out << r.scene << ',' << r.solver << ',' << r.iterations << ',' << r.steps << ','
+        << r.bodies << ',' << r.contacts << ',' << r.joints << ',' << r.ms_per_step
+        << ',' << r.drift_max << ',' << r.penetration_linf << ',' << r.energy_drift
+        << ',' << r.cone_consistency << ',' << (r.simd ? 1 : 0) << ',' << r.threads
+        << '\n';
   }
 }
 
@@ -664,6 +889,236 @@ void print_results_table() {
   std::cout << std::defaultfloat;
 }
 
+void write_microbench_csv() {
+  if (g_micro_results.empty()) {
+    return;
+  }
+  const std::filesystem::path path(g_micro_csv_path);
+  if (!path.parent_path().empty()) {
+    std::filesystem::create_directories(path.parent_path());
+  }
+  const bool exists = std::filesystem::exists(path);
+  std::ofstream out(path, std::ios::app);
+  if (!exists || out.tellp() == 0) {
+    out << "kernel,variant,lane,threads,N_rows,ns_per_row\n";
+  }
+  for (const MicrobenchResult& r : g_micro_results) {
+    out << r.kernel << ',' << r.variant << ',' << r.lane << ',' << r.threads << ','
+        << r.rows << ',' << r.ns_per_row << '\n';
+  }
+}
+
+void MicrobenchUpdateNormal(benchmark::State& state) {
+  const bool use_simd = state.range(0) != 0;
+  const int rows = 1024;
+  std::vector<double> target(rows, 1.0);
+  std::vector<double> v_rel(rows, 0.2);
+  std::vector<double> k(rows, 2.0);
+  std::vector<double> impulses(rows, 0.0);
+  const int width = use_simd ? std::max(1, soa::kLane) : 1;
+
+  double total_elapsed = 0.0;
+  int iterations = 0;
+  for (auto _ : state) {
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < rows; i += width) {
+      const int count = std::min(width, rows - i);
+      if (use_simd) {
+        soa_simd::update_normal_batch(target.data() + i, v_rel.data() + i,
+                                      k.data() + i, impulses.data() + i, count);
+      } else {
+        for (int lane = 0; lane < count; ++lane) {
+          const int idx = i + lane;
+          const double delta = (target[idx] - v_rel[idx]) / k[idx];
+          impulses[idx] += delta;
+        }
+      }
+    }
+    auto end = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(end - start).count();
+    total_elapsed += elapsed;
+    ++iterations;
+    state.SetIterationTime(elapsed);
+  }
+
+  if (state.thread_index == 0 && iterations > 0) {
+    MicrobenchResult result;
+    result.kernel = "SOA_UpdateNormal";
+    result.variant = use_simd ? "simd" : "scalar";
+    result.lane = use_simd ? std::max(1, soa::kLane) : 1;
+    result.threads = 1;
+    result.rows = rows;
+    result.ns_per_row =
+        (total_elapsed / static_cast<double>(iterations)) * 1e9 /
+        static_cast<double>(rows);
+    record_micro_result(result);
+  }
+}
+
+void MicrobenchUpdateTangent(benchmark::State& state) {
+  const bool use_simd = state.range(0) != 0;
+  const int rows = 1024;
+  std::vector<double> target(rows, 0.5);
+  std::vector<double> v_rel(rows, 0.1);
+  std::vector<double> k(rows, 3.0);
+  std::vector<double> impulses(rows, 0.0);
+  const int width = use_simd ? std::max(1, soa::kLane) : 1;
+
+  double total_elapsed = 0.0;
+  int iterations = 0;
+  for (auto _ : state) {
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < rows; i += width) {
+      const int count = std::min(width, rows - i);
+      if (use_simd) {
+        soa_simd::update_tangent_batch(target.data() + i, v_rel.data() + i,
+                                       k.data() + i, impulses.data() + i, count);
+      } else {
+        for (int lane = 0; lane < count; ++lane) {
+          const int idx = i + lane;
+          const double delta = (target[idx] - v_rel[idx]) / k[idx];
+          impulses[idx] += delta;
+        }
+      }
+    }
+    auto end = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(end - start).count();
+    total_elapsed += elapsed;
+    ++iterations;
+    state.SetIterationTime(elapsed);
+  }
+
+  if (state.thread_index == 0 && iterations > 0) {
+    MicrobenchResult result;
+    result.kernel = "SOA_UpdateTangents";
+    result.variant = use_simd ? "simd" : "scalar";
+    result.lane = use_simd ? std::max(1, soa::kLane) : 1;
+    result.threads = 1;
+    result.rows = rows;
+    result.ns_per_row =
+        (total_elapsed / static_cast<double>(iterations)) * 1e9 /
+        static_cast<double>(rows);
+    record_micro_result(result);
+  }
+}
+
+void MicrobenchApplyImpulses(benchmark::State& state) {
+  const bool use_simd = state.range(0) != 0;
+  const int rows_count = 256;
+  RowSOA rows;
+  rows.a.assign(rows_count, 0);
+  rows.b.assign(rows_count, 1);
+  rows.n.assign(rows_count, math::Vec3(0.0, 1.0, 0.0));
+  rows.t1.assign(rows_count, math::Vec3(1.0, 0.0, 0.0));
+  rows.t2.assign(rows_count, math::Vec3(0.0, 0.0, 1.0));
+  rows.ra.assign(rows_count, math::Vec3(0.0, 0.0, 0.0));
+  rows.rb.assign(rows_count, math::Vec3(0.0, 0.0, 0.0));
+  rows.indices.resize(rows_count);
+  for (int i = 0; i < rows_count; ++i) {
+    rows.indices[i] = i;
+  }
+
+  std::vector<double> delta_jn(rows_count, 0.05);
+  std::vector<double> delta_jt1(rows_count, 0.01);
+  std::vector<double> delta_jt2(rows_count, 0.015);
+
+  std::vector<RigidBody> base_bodies(2);
+  base_bodies[0].invMass = 1.0;
+  base_bodies[1].invMass = 1.0;
+  base_bodies[0].invInertiaLocal = math::Mat3::identity();
+  base_bodies[1].invInertiaLocal = math::Mat3::identity();
+  base_bodies[0].syncDerived();
+  base_bodies[1].syncDerived();
+
+  const int width = use_simd ? std::max(1, soa::kLane) : 1;
+  double total_elapsed = 0.0;
+  int iterations = 0;
+  for (auto _ : state) {
+    std::vector<RigidBody> bodies = base_bodies;
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < rows_count; i += width) {
+      const int count = std::min(width, rows_count - i);
+      if (use_simd) {
+        soa_simd::apply_impulses_batch(bodies, rows, delta_jn.data() + i,
+                                       delta_jt1.data() + i,
+                                       delta_jt2.data() + i, i, count);
+      } else {
+        for (int lane = 0; lane < count; ++lane) {
+          const int idx = i + lane;
+          const math::Vec3 Pn = rows.n[idx] * delta_jn[idx];
+          const math::Vec3 Pt1 = rows.t1[idx] * delta_jt1[idx];
+          const math::Vec3 Pt2 = rows.t2[idx] * delta_jt2[idx];
+          const math::Vec3 impulse = Pn + Pt1 + Pt2;
+          bodies[rows.a[idx]].applyImpulse(-impulse, rows.ra[idx]);
+          bodies[rows.b[idx]].applyImpulse(impulse, rows.rb[idx]);
+        }
+      }
+    }
+    auto end = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(end - start).count();
+    total_elapsed += elapsed;
+    ++iterations;
+    state.SetIterationTime(elapsed);
+  }
+
+  if (state.thread_index == 0 && iterations > 0) {
+    MicrobenchResult result;
+    result.kernel = "SOA_ApplyImpulses";
+    result.variant = use_simd ? "simd" : "scalar";
+    result.lane = use_simd ? std::max(1, soa::kLane) : 1;
+    result.threads = 1;
+    result.rows = rows_count;
+    result.ns_per_row =
+        (total_elapsed / static_cast<double>(iterations)) * 1e9 /
+        static_cast<double>(rows_count);
+    record_micro_result(result);
+  }
+}
+
+void MicrobenchSoaMtScaling(benchmark::State& state) {
+  const int threads = std::max(1, static_cast<int>(state.range(0)));
+  const Scene base_scene = make_spheres_box_cloud(256);
+  SoaParams params;
+  params.iterations = 1;
+  params.dt = 1.0 / 60.0;
+  params.use_simd = true;
+  params.use_threads = true;
+  params.thread_count = threads;
+
+  double total_elapsed = 0.0;
+  int iterations = 0;
+  for (auto _ : state) {
+    std::vector<RigidBody> bodies = base_scene.bodies;
+    std::vector<Contact> contacts = base_scene.contacts;
+    std::vector<DistanceJoint> joints = base_scene.joints;
+    build_contact_offsets_and_bias(bodies, contacts, params);
+    RowSOA rows = build_soa(bodies, contacts, params);
+    build_distance_joint_rows(bodies, joints, params.dt);
+    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+    auto start = std::chrono::steady_clock::now();
+    solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+    auto end = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(end - start).count();
+    total_elapsed += elapsed;
+    ++iterations;
+    state.SetIterationTime(elapsed);
+  }
+
+  if (state.thread_index == 0 && iterations > 0) {
+    const int rows_processed = std::max<std::size_t>(1, base_scene.contacts.size());
+    MicrobenchResult result;
+    result.kernel = "SOA_MT_Scaling";
+    result.variant = "threads_" + std::to_string(threads);
+    result.lane = std::max(1, soa::kLane);
+    result.threads = threads;
+    result.rows = rows_processed;
+    result.ns_per_row =
+        (total_elapsed / static_cast<double>(iterations)) * 1e9 /
+        static_cast<double>(rows_processed);
+    record_micro_result(result);
+  }
+}
+
 }  // namespace
 
 BENCHMARK(BenchSpheresCloudBaseline4096)->UseManualTime();
@@ -681,11 +1136,27 @@ BENCHMARK(BenchChainCached)->UseManualTime();
 BENCHMARK(BenchChainSoA)->UseManualTime();
 BENCHMARK(BenchRopeCached)->UseManualTime();
 BENCHMARK(BenchRopeSoA)->UseManualTime();
+BENCHMARK(MicrobenchUpdateNormal)->Arg(0)->Arg(1)->UseManualTime();
+BENCHMARK(MicrobenchUpdateTangent)->Arg(0)->Arg(1)->UseManualTime();
+BENCHMARK(MicrobenchApplyImpulses)->Arg(0)->Arg(1)->UseManualTime();
+BENCHMARK(MicrobenchSoaMtScaling)->Arg(1)->Arg(2)->Arg(4)->Arg(8)->UseManualTime();
 
 int main(int argc, char** argv) {
-  benchmark::Initialize(&argc, argv);
+  std::vector<char*> passthrough;
+  CliOptions opts = parse_cli_options(argc, argv, passthrough);
+  if (opts.run_cli) {
+    if (!run_cli_mode(opts)) {
+      return 1;
+    }
+    return 0;
+  }
+
+  passthrough.push_back(nullptr);
+  int bench_argc = static_cast<int>(passthrough.size()) - 1;
+  benchmark::Initialize(&bench_argc, passthrough.data());
   benchmark::RunSpecifiedBenchmarks();
   write_results_csv();
+  write_microbench_csv();
   print_results_table();
   benchmark::Shutdown();
   return 0;
