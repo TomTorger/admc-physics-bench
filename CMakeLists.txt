@@ -6,11 +6,14 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(FetchContent)
 option(BUILD_TESTING "Build tests" ON)
+option(ENABLE_BENCHMARKS "Build benchmark binary" ON)
 
-FetchContent_Declare(benchmark
-  GIT_REPOSITORY https://github.com/google/benchmark.git
-  GIT_TAG v1.8.3)
-FetchContent_MakeAvailable(benchmark)
+if(ENABLE_BENCHMARKS)
+  FetchContent_Declare(benchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG v1.8.3)
+  FetchContent_MakeAvailable(benchmark)
+endif()
 
 add_library(core
   src/math.hpp src/types.hpp
@@ -19,12 +22,23 @@ add_library(core
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 
-add_executable(bench bench/bench_main.cc)
-target_link_libraries(bench PRIVATE core benchmark::benchmark)
+if(ENABLE_BENCHMARKS)
+  add_executable(bench bench/bench_main.cc)
+  target_link_libraries(bench PRIVATE core benchmark::benchmark)
+endif()
 
 if(BUILD_TESTING)
   enable_testing()
-  add_executable(tests tests/test_invariants.cc tests/test_sanity.cc)
-  target_link_libraries(tests PRIVATE core)
-  add_test(NAME all_tests COMMAND tests)
+  add_executable(test_invariants tests/test_invariants.cc)
+  target_link_libraries(test_invariants PRIVATE core)
+  add_executable(test_sanity tests/test_sanity.cc)
+  target_link_libraries(test_sanity PRIVATE core)
+  add_executable(test_solvers tests/test_solvers.cc)
+  target_link_libraries(test_solvers PRIVATE core)
+
+  add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers)
+
+  add_test(NAME test_invariants COMMAND test_invariants)
+  add_test(NAME test_sanity COMMAND test_sanity)
+  add_test(NAME test_solvers COMMAND test_solvers)
 endif()

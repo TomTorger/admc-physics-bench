@@ -39,14 +39,54 @@ struct Contact {
   Vec3 n;      //!< Contact normal from body a to body b.
   Vec3 ra;     //!< Offset from body a COM to contact.
   Vec3 rb;     //!< Offset from body b COM to contact.
+  Vec3 t1;     //!< First orthonormal tangent.
+  Vec3 t2;     //!< Second orthonormal tangent.
+  Vec3 ra_cross_n;
+  Vec3 rb_cross_n;
+  Vec3 ra_cross_t1;
+  Vec3 rb_cross_t1;
+  Vec3 ra_cross_t2;
+  Vec3 rb_cross_t2;
   double e = 0.0;
   double mu = 0.0;
   double bias = 0.0;
+  double penetration = 0.0;
   double jn = 0.0; //!< Warm-start accumulator for normal impulse.
+  double jt1 = 0.0; //!< Warm-start accumulator for first friction tangent.
+  double jt2 = 0.0; //!< Warm-start accumulator for second friction tangent.
+  double k_n = 0.0;
+  double k_t1 = 0.0;
+  double k_t2 = 0.0;
 };
 
-//! Placeholder for future structure-of-arrays rows.
+//! Structure-of-arrays representation of contacts for batched solves.
 struct RowSOA {
+  std::vector<int> a;
+  std::vector<int> b;
+  std::vector<Vec3> n;
+  std::vector<Vec3> t1;
+  std::vector<Vec3> t2;
+  std::vector<Vec3> ra;
+  std::vector<Vec3> rb;
+  std::vector<Vec3> ra_cross_n;
+  std::vector<Vec3> rb_cross_n;
+  std::vector<Vec3> ra_cross_t1;
+  std::vector<Vec3> rb_cross_t1;
+  std::vector<Vec3> ra_cross_t2;
+  std::vector<Vec3> rb_cross_t2;
+  std::vector<double> k_n;
+  std::vector<double> k_t1;
+  std::vector<double> k_t2;
+  std::vector<double> jn;
+  std::vector<double> jt1;
+  std::vector<double> jt2;
+  std::vector<double> mu;
+  std::vector<double> e;
+  std::vector<double> bias;
+  std::vector<double> penetration;
+  std::vector<int> indices; //!< Mapping back to original contact indices.
+
+  std::size_t size() const { return a.size(); }
 };
 
 // ----------------------- Inline implementation -----------------------
