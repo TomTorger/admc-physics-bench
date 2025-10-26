@@ -24,7 +24,22 @@ target_link_libraries(bench PRIVATE core benchmark::benchmark)
 
 if(BUILD_TESTING)
   enable_testing()
-  add_executable(tests tests/test_invariants.cc tests/test_sanity.cc)
-  target_link_libraries(tests PRIVATE core)
-  add_test(NAME all_tests COMMAND tests)
+
+  add_executable(test_sanity tests/test_sanity.cc)
+  target_link_libraries(test_sanity PRIVATE core)
+  add_test(NAME test_sanity COMMAND test_sanity)
+
+  add_executable(test_invariants tests/test_invariants.cc)
+  target_link_libraries(test_invariants PRIVATE core)
+  add_test(NAME test_invariants COMMAND test_invariants)
+
+  add_executable(test_equivalence_scalar_vs_baseline
+                 tests/test_equivalence_scalar_vs_baseline.cc)
+  target_link_libraries(test_equivalence_scalar_vs_baseline PRIVATE core)
+  add_test(NAME test_equivalence_scalar_vs_baseline
+           COMMAND test_equivalence_scalar_vs_baseline)
+
+  add_executable(test_friction_cone_and_energy tests/test_friction_cone_and_energy.cc)
+  target_link_libraries(test_friction_cone_and_energy PRIVATE core)
+  add_test(NAME test_friction_cone_and_energy COMMAND test_friction_cone_and_energy)
 endif()
