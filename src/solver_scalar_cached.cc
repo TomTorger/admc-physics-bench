@@ -57,11 +57,17 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     c.ra = c.p - A.x;
     c.rb = c.p - B.x;
 
+    const math::Vec3 va = A.v + math::cross(A.w, c.ra);
+    const math::Vec3 vb = B.v + math::cross(B.w, c.rb);
+    const double v_rel_n_initial = math::dot(c.n, vb - va);
+
     if (std::fabs(c.C) <= math::kEps) {
       c.C = 0.0;
     }
+    const double restitution = std::max(c.e, params.restitution);
+    c.e = restitution;
     c.bias = -beta_dt * std::max(0.0, -c.C - params.slop);
-    c.e = std::max(c.e, params.restitution);
+    c.bounce = (v_rel_n_initial < 0.0) ? (-restitution * v_rel_n_initial) : 0.0;
     c.mu = std::max(c.mu, params.mu);
 
     c.ra_cross_n = math::cross(c.ra, c.n);
@@ -209,12 +215,9 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       const Vec3 v_rel = vb - va;
       const double v_rel_n = math::dot(c.n, v_rel);
 
-      double target = c.bias;
-      if (v_rel_n < 0.0) {
-        target += -c.e * v_rel_n;
-      }
+      const double rhs = -(v_rel_n + c.bias - c.bounce);
 
-      const double delta_jn = (target - v_rel_n) / c.k_n;
+      const double delta_jn = rhs / c.k_n;
       const double jn_old = c.jn;
       c.jn = std::max(0.0, c.jn + delta_jn);
       const double applied_n = c.jn - jn_old;

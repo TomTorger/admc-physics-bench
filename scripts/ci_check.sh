@@ -52,4 +52,9 @@ if [[ "${RUN_LARGE:-0}" == "1" ]]; then
   run_case spheres_cloud_8192 soa    10 30
 fi
 
+if [[ -s "${CSV}" ]]; then
+  echo "== Last 10 rows =="
+  tail -n 10 "${CSV}"
+fi
+
 echo "== Done. CSV at ${CSV} =="

@@ -218,6 +218,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
   std::vector<DistanceJoint> joints = base_scene.joints;
+  refresh_contacts_from_state(bodies, contacts);
   const std::vector<RigidBody> pre = bodies;
 
   const auto start = std::chrono::steady_clock::now();
@@ -231,6 +232,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       build_contact_offsets_and_bias(bodies, contacts, params);
       solve_baseline(bodies, contacts, params);
     }
+    refresh_contacts_from_state(bodies, contacts);
   } else if (normalized == "cached") {
     SolverParams params;
     params.iterations = safe_iterations;
@@ -242,6 +244,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       solve_scalar_cached(bodies, contacts, joints, params);
     }
     build_distance_joint_rows(bodies, joints, params.dt);
+    refresh_contacts_from_state(bodies, contacts);
   } else if (normalized == "soa") {
     SolverParams params;
     params.iterations = safe_iterations;
@@ -252,6 +255,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       RowSOA rows = build_soa(bodies, contacts, params);
       solve_scalar_soa(bodies, contacts, rows, params);
     }
+    refresh_contacts_from_state(bodies, contacts);
   } else {
     std::cerr << "Unknown solver: " << solver_name << "\n";
     return std::nullopt;

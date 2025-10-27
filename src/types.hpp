@@ -57,6 +57,7 @@ struct Contact {
   double e = 0.0;
   double mu = 0.0;
   double bias = 0.0;
+  double bounce = 0.0; //!< Stored restitution target for scalar solvers.
   double C = 0.0; //!< Constraint violation (negative when penetrating).
   double jn = 0.0; //!< Warm-start accumulator for normal impulse.
   double jt1 = 0.0; //!< Warm-start accumulator for first friction tangent.
@@ -94,6 +95,7 @@ struct RowSOA {
   std::vector<double> mu;
   std::vector<double> e;
   std::vector<double> bias;
+  std::vector<double> bounce;
   std::vector<double> C;
   std::vector<int> indices; //!< Mapping back to original contact indices.
 

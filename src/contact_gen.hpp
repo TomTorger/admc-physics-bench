@@ -13,3 +13,6 @@ void build_contact_offsets_and_bias(std::vector<RigidBody>& bodies,
                                     std::vector<Contact>& contacts,
                                     const SolverParams& params);
 
+void refresh_contacts_from_state(const std::vector<RigidBody>& bodies,
+                                 std::vector<Contact>& contacts);
+

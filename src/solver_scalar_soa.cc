@@ -101,6 +101,7 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
   rows.mu.reserve(contacts.size());
   rows.e.reserve(contacts.size());
   rows.bias.reserve(contacts.size());
+  rows.bounce.reserve(contacts.size());
   rows.C.reserve(contacts.size());
   rows.indices.reserve(contacts.size());
 
@@ -142,6 +143,11 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
 
     const double restitution = std::max(c.e, params.restitution);
     const double mu = std::max(c.mu, params.mu);
+
+    const Vec3 va = A.v + math::cross(A.w, ra);
+    const Vec3 vb = B.v + math::cross(B.w, rb);
+    const double v_rel_n = math::dot(n, vb - va);
+    const double bounce = (v_rel_n < 0.0) ? (-restitution * v_rel_n) : 0.0;
 
     const Vec3 ra_cross_n = math::cross(ra, n);
     const Vec3 rb_cross_n = math::cross(rb, n);
@@ -199,6 +205,7 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     rows.mu.push_back(mu);
     rows.e.push_back(restitution);
     rows.bias.push_back(bias);
+    rows.bounce.push_back(bounce);
     rows.C.push_back(violation);
   }
 
@@ -313,12 +320,9 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const Vec3 v_rel = vb - va;
       const double v_rel_n = math::dot(rows.n[i], v_rel);
 
-      double target = rows.bias[i];
-      if (v_rel_n < 0.0) {
-        target += -rows.e[i] * v_rel_n;
-      }
+      const double rhs = -(v_rel_n + rows.bias[i] - rows.bounce[i]);
 
-      const double delta_jn = (target - v_rel_n) / rows.k_n[i];
+      const double delta_jn = rhs / rows.k_n[i];
       const double jn_old = rows.jn[i];
       const double jn_candidate = rows.jn[i] + delta_jn;
       if (jn_candidate < 0.0 && debug_info) {
@@ -459,6 +463,7 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     c.mu = rows.mu[i];
     c.e = rows.e[i];
     c.bias = rows.bias[i];
+    c.bounce = rows.bounce[i];
     c.C = rows.C[i];
   }
 
