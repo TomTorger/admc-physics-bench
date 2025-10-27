@@ -1160,13 +1160,60 @@ void MicrobenchApplyImpulses(benchmark::State& state) {
   const bool use_simd = state.range(0) != 0;
   const int rows_count = 256;
   RowSOA rows;
+  rows.N = rows_count;
   rows.a.assign(rows_count, 0);
   rows.b.assign(rows_count, 1);
-  rows.n.assign(rows_count, math::Vec3(0.0, 1.0, 0.0));
-  rows.t1.assign(rows_count, math::Vec3(1.0, 0.0, 0.0));
-  rows.t2.assign(rows_count, math::Vec3(0.0, 0.0, 1.0));
-  rows.ra.assign(rows_count, math::Vec3(0.0, 0.0, 0.0));
-  rows.rb.assign(rows_count, math::Vec3(0.0, 0.0, 0.0));
+  rows.nx.assign(rows_count, 0.0);
+  rows.ny.assign(rows_count, 1.0);
+  rows.nz.assign(rows_count, 0.0);
+  rows.t1x.assign(rows_count, 1.0);
+  rows.t1y.assign(rows_count, 0.0);
+  rows.t1z.assign(rows_count, 0.0);
+  rows.t2x.assign(rows_count, 0.0);
+  rows.t2y.assign(rows_count, 0.0);
+  rows.t2z.assign(rows_count, 1.0);
+  rows.rax.assign(rows_count, 0.0);
+  rows.ray.assign(rows_count, 0.0);
+  rows.raz.assign(rows_count, 0.0);
+  rows.rbx.assign(rows_count, 0.0);
+  rows.rby.assign(rows_count, 0.0);
+  rows.rbz.assign(rows_count, 0.0);
+  rows.raxn_x.assign(rows_count, 0.0);
+  rows.raxn_y.assign(rows_count, 0.0);
+  rows.raxn_z.assign(rows_count, 0.0);
+  rows.rbxn_x.assign(rows_count, 0.0);
+  rows.rbxn_y.assign(rows_count, 0.0);
+  rows.rbxn_z.assign(rows_count, 0.0);
+  rows.raxt1_x.assign(rows_count, 0.0);
+  rows.raxt1_y.assign(rows_count, 0.0);
+  rows.raxt1_z.assign(rows_count, 0.0);
+  rows.rbxt1_x.assign(rows_count, 0.0);
+  rows.rbxt1_y.assign(rows_count, 0.0);
+  rows.rbxt1_z.assign(rows_count, 0.0);
+  rows.raxt2_x.assign(rows_count, 0.0);
+  rows.raxt2_y.assign(rows_count, 0.0);
+  rows.raxt2_z.assign(rows_count, 0.0);
+  rows.rbxt2_x.assign(rows_count, 0.0);
+  rows.rbxt2_y.assign(rows_count, 0.0);
+  rows.rbxt2_z.assign(rows_count, 0.0);
+  rows.TWn_a_x.assign(rows_count, 0.0);
+  rows.TWn_a_y.assign(rows_count, 0.0);
+  rows.TWn_a_z.assign(rows_count, 0.0);
+  rows.TWn_b_x.assign(rows_count, 0.0);
+  rows.TWn_b_y.assign(rows_count, 0.0);
+  rows.TWn_b_z.assign(rows_count, 0.0);
+  rows.TWt1_a_x.assign(rows_count, 0.0);
+  rows.TWt1_a_y.assign(rows_count, 0.0);
+  rows.TWt1_a_z.assign(rows_count, 0.0);
+  rows.TWt1_b_x.assign(rows_count, 0.0);
+  rows.TWt1_b_y.assign(rows_count, 0.0);
+  rows.TWt1_b_z.assign(rows_count, 0.0);
+  rows.TWt2_a_x.assign(rows_count, 0.0);
+  rows.TWt2_a_y.assign(rows_count, 0.0);
+  rows.TWt2_a_z.assign(rows_count, 0.0);
+  rows.TWt2_b_x.assign(rows_count, 0.0);
+  rows.TWt2_b_y.assign(rows_count, 0.0);
+  rows.TWt2_b_z.assign(rows_count, 0.0);
   rows.indices.resize(rows_count);
   for (int i = 0; i < rows_count; ++i) {
     rows.indices[i] = i;
@@ -1199,12 +1246,51 @@ void MicrobenchApplyImpulses(benchmark::State& state) {
       } else {
         for (int lane = 0; lane < count; ++lane) {
           const int idx = i + lane;
-          const math::Vec3 Pn = rows.n[idx] * delta_jn[idx];
-          const math::Vec3 Pt1 = rows.t1[idx] * delta_jt1[idx];
-          const math::Vec3 Pt2 = rows.t2[idx] * delta_jt2[idx];
-          const math::Vec3 impulse = Pn + Pt1 + Pt2;
-          bodies[rows.a[idx]].applyImpulse(-impulse, rows.ra[idx]);
-          bodies[rows.b[idx]].applyImpulse(impulse, rows.rb[idx]);
+          RigidBody& A = bodies[rows.a[idx]];
+          RigidBody& B = bodies[rows.b[idx]];
+          const double dj_n = delta_jn[idx];
+          const double dj_t1 = delta_jt1[idx];
+          const double dj_t2 = delta_jt2[idx];
+
+          const double impulse_x = rows.nx[idx] * dj_n + rows.t1x[idx] * dj_t1 +
+                                   rows.t2x[idx] * dj_t2;
+          const double impulse_y = rows.ny[idx] * dj_n + rows.t1y[idx] * dj_t1 +
+                                   rows.t2y[idx] * dj_t2;
+          const double impulse_z = rows.nz[idx] * dj_n + rows.t1z[idx] * dj_t1 +
+                                   rows.t2z[idx] * dj_t2;
+
+          A.v.x -= impulse_x * A.invMass;
+          A.v.y -= impulse_y * A.invMass;
+          A.v.z -= impulse_z * A.invMass;
+          B.v.x += impulse_x * B.invMass;
+          B.v.y += impulse_y * B.invMass;
+          B.v.z += impulse_z * B.invMass;
+
+          const double dw_ax = dj_n * rows.TWn_a_x[idx] +
+                               dj_t1 * rows.TWt1_a_x[idx] +
+                               dj_t2 * rows.TWt2_a_x[idx];
+          const double dw_ay = dj_n * rows.TWn_a_y[idx] +
+                               dj_t1 * rows.TWt1_a_y[idx] +
+                               dj_t2 * rows.TWt2_a_y[idx];
+          const double dw_az = dj_n * rows.TWn_a_z[idx] +
+                               dj_t1 * rows.TWt1_a_z[idx] +
+                               dj_t2 * rows.TWt2_a_z[idx];
+          const double dw_bx = dj_n * rows.TWn_b_x[idx] +
+                               dj_t1 * rows.TWt1_b_x[idx] +
+                               dj_t2 * rows.TWt2_b_x[idx];
+          const double dw_by = dj_n * rows.TWn_b_y[idx] +
+                               dj_t1 * rows.TWt1_b_y[idx] +
+                               dj_t2 * rows.TWt2_b_y[idx];
+          const double dw_bz = dj_n * rows.TWn_b_z[idx] +
+                               dj_t1 * rows.TWt1_b_z[idx] +
+                               dj_t2 * rows.TWt2_b_z[idx];
+
+          A.w.x -= dw_ax;
+          A.w.y -= dw_ay;
+          A.w.z -= dw_az;
+          B.w.x += dw_bx;
+          B.w.y += dw_by;
+          B.w.z += dw_bz;
         }
       }
     }

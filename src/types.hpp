@@ -73,33 +73,48 @@ struct Contact {
 
 //! Structure-of-arrays representation of contacts for batched solves.
 struct RowSOA {
+  int N = 0;
+
   std::vector<int> a;
   std::vector<int> b;
-  std::vector<Vec3> n;
-  std::vector<Vec3> t1;
-  std::vector<Vec3> t2;
-  std::vector<Vec3> ra;
-  std::vector<Vec3> rb;
-  std::vector<Vec3> ra_cross_n;
-  std::vector<Vec3> rb_cross_n;
-  std::vector<Vec3> ra_cross_t1;
-  std::vector<Vec3> rb_cross_t1;
-  std::vector<Vec3> ra_cross_t2;
-  std::vector<Vec3> rb_cross_t2;
-  std::vector<double> k_n;
-  std::vector<double> k_t1;
-  std::vector<double> k_t2;
-  std::vector<double> jn;
-  std::vector<double> jt1;
-  std::vector<double> jt2;
-  std::vector<double> mu;
-  std::vector<double> e;
-  std::vector<double> bias;
-  std::vector<double> bounce;
-  std::vector<double> C;
+
+  // Contact frames (unit vectors)
+  std::vector<double> nx, ny, nz;
+  std::vector<double> t1x, t1y, t1z;
+  std::vector<double> t2x, t2y, t2z;
+
+  // Offsets from center of mass to contact point
+  std::vector<double> rax, ray, raz;
+  std::vector<double> rbx, rby, rbz;
+
+  // Cross terms r x d
+  std::vector<double> raxn_x, raxn_y, raxn_z;
+  std::vector<double> rbxn_x, rbxn_y, rbxn_z;
+  std::vector<double> raxt1_x, raxt1_y, raxt1_z;
+  std::vector<double> rbxt1_x, rbxt1_y, rbxt1_z;
+  std::vector<double> raxt2_x, raxt2_y, raxt2_z;
+  std::vector<double> rbxt2_x, rbxt2_y, rbxt2_z;
+
+  // Inertia-multiplied cross terms TW = I^-1 * (r x d)
+  std::vector<double> TWn_a_x, TWn_a_y, TWn_a_z;
+  std::vector<double> TWn_b_x, TWn_b_y, TWn_b_z;
+  std::vector<double> TWt1_a_x, TWt1_a_y, TWt1_a_z;
+  std::vector<double> TWt1_b_x, TWt1_b_y, TWt1_b_z;
+  std::vector<double> TWt2_a_x, TWt2_a_y, TWt2_a_z;
+  std::vector<double> TWt2_b_x, TWt2_b_y, TWt2_b_z;
+
+  // Effective masses per direction
+  std::vector<double> k_n, k_t1, k_t2;
+
+  // Material / bias terms per contact
+  std::vector<double> mu, e, bias, bounce, C;
+
+  // Accumulated impulses (warm-start)
+  std::vector<double> jn, jt1, jt2;
+
   std::vector<int> indices; //!< Mapping back to original contact indices.
 
-  std::size_t size() const { return a.size(); }
+  std::size_t size() const { return static_cast<std::size_t>(N); }
 };
 
 // ----------------------- Inline implementation -----------------------
