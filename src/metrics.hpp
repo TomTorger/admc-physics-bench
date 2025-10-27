@@ -14,6 +14,8 @@ Drift directional_momentum_drift(const std::vector<RigidBody>& pre,
 
 double constraint_penetration_Linf(const std::vector<Contact>& contacts);
 
+double kinetic_energy(const std::vector<RigidBody>& bodies);
+
 double energy_drift(const std::vector<RigidBody>& pre,
                     const std::vector<RigidBody>& post);
 

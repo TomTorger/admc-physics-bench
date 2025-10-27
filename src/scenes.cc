@@ -14,14 +14,14 @@ RigidBody make_dynamic_body(const math::Vec3& pos) {
 }
 
 Contact make_contact(int a, int b, const math::Vec3& p, const math::Vec3& n,
-                     double restitution = 0.0, double penetration = 0.0) {
+                     double restitution = 0.0, double C = 0.0) {
   Contact c;
   c.a = a;
   c.b = b;
   c.p = p;
   c.n = n;
   c.e = restitution;
-  c.penetration = penetration;
+  c.C = C;
   return c;
 }
 }  // namespace
@@ -43,6 +43,9 @@ Scene make_two_spheres_head_on() {
   Contact c = make_contact(0, 1, math::Vec3(0.0, 0.0, 0.0), math::Vec3(1.0, 0.0, 0.0),
                            1.0, 0.0);
   scene.contacts.push_back(c);
+  scene.contacts.back().type = Contact::Type::kSphereSphere;
+  scene.contacts.back().radius_a = radius;
+  scene.contacts.back().radius_b = radius;
 
   return scene;
 }
@@ -156,6 +159,9 @@ Scene make_spheres_box_cloud(int N) {
 
         Contact floor_contact =
             make_contact(0, body_index, math::Vec3(x, 0.0, z), math::Vec3(0.0, 1.0, 0.0));
+        floor_contact.type = Contact::Type::kSpherePlane;
+        floor_contact.radius_b = radius;
+        floor_contact.plane_offset = math::dot(floor_contact.n, floor_contact.p);
         scene.contacts.push_back(floor_contact);
 
         if (ix > 0) {
@@ -166,8 +172,12 @@ Scene make_spheres_box_cloud(int N) {
             const math::Vec3 pos_b = body.x;
             const math::Vec3 midpoint = (pos_a + pos_b) * 0.5;
             const math::Vec3 normal = math::normalize_safe(pos_b - pos_a);
-            scene.contacts.push_back(
-                make_contact(neighbor_index, body_index, midpoint, normal));
+            Contact contact =
+                make_contact(neighbor_index, body_index, midpoint, normal);
+            contact.type = Contact::Type::kSphereSphere;
+            contact.radius_a = radius;
+            contact.radius_b = radius;
+            scene.contacts.push_back(contact);
           }
         }
 
@@ -179,8 +189,12 @@ Scene make_spheres_box_cloud(int N) {
             const math::Vec3 pos_b = body.x;
             const math::Vec3 midpoint = (pos_a + pos_b) * 0.5;
             const math::Vec3 normal = math::normalize_safe(pos_b - pos_a);
-            scene.contacts.push_back(
-                make_contact(neighbor_index, body_index, midpoint, normal));
+            Contact contact =
+                make_contact(neighbor_index, body_index, midpoint, normal);
+            contact.type = Contact::Type::kSphereSphere;
+            contact.radius_a = radius;
+            contact.radius_b = radius;
+            scene.contacts.push_back(contact);
           }
         }
 
@@ -192,8 +206,12 @@ Scene make_spheres_box_cloud(int N) {
             const math::Vec3 pos_b = body.x;
             const math::Vec3 midpoint = (pos_a + pos_b) * 0.5;
             const math::Vec3 normal = math::normalize_safe(pos_b - pos_a);
-            scene.contacts.push_back(
-                make_contact(neighbor_index, body_index, midpoint, normal));
+            Contact contact =
+                make_contact(neighbor_index, body_index, midpoint, normal);
+            contact.type = Contact::Type::kSphereSphere;
+            contact.radius_a = radius;
+            contact.radius_b = radius;
+            scene.contacts.push_back(contact);
           }
         }
 
@@ -225,15 +243,23 @@ Scene make_box_stack(int layers) {
     scene.bodies.push_back(box);
 
     if (layer == 0) {
-      scene.contacts.push_back(
-          make_contact(0, body_index, math::Vec3(0.0, 0.0, 0.0), math::Vec3(0.0, 1.0, 0.0)));
+      Contact contact =
+          make_contact(0, body_index, math::Vec3(0.0, 0.0, 0.0), math::Vec3(0.0, 1.0, 0.0));
+      contact.type = Contact::Type::kSpherePlane;
+      contact.radius_b = half_height;
+      contact.plane_offset = math::dot(contact.n, contact.p);
+      scene.contacts.push_back(contact);
     } else {
       const int lower_index = body_index - 1;
       const math::Vec3 pos_lower = scene.bodies[lower_index].x;
       const math::Vec3 pos_upper = box.x;
       const math::Vec3 midpoint = (pos_lower + pos_upper) * 0.5;
-      scene.contacts.push_back(make_contact(lower_index, body_index, midpoint,
-                                            math::Vec3(0.0, 1.0, 0.0)));
+      Contact contact =
+          make_contact(lower_index, body_index, midpoint, math::Vec3(0.0, 1.0, 0.0));
+      contact.type = Contact::Type::kSphereSphere;
+      contact.radius_a = half_height;
+      contact.radius_b = half_height;
+      scene.contacts.push_back(contact);
     }
   }
 

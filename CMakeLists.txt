@@ -87,10 +87,13 @@ if(BUILD_TESTING)
   target_link_libraries(test_quick_parity PRIVATE core)
   add_executable(test_csv_header_only tests/test_csv_header_only.cc)
   target_link_libraries(test_csv_header_only PRIVATE core)
+  add_executable(test_energy_and_penetration tests/test_energy_and_penetration.cc)
+  target_link_libraries(test_energy_and_penetration PRIVATE core)
 
   add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers test_joints
                                    test_simd_parity test_thread_determinism
-                                   test_quick_parity test_csv_header_only)
+                                   test_quick_parity test_csv_header_only
+                                   test_energy_and_penetration)
 
   add_test(NAME test_invariants COMMAND test_invariants)
   add_test(NAME test_sanity COMMAND test_sanity)
@@ -100,4 +103,5 @@ if(BUILD_TESTING)
   add_test(NAME test_thread_determinism COMMAND test_thread_determinism)
   add_test(NAME test_quick_parity COMMAND test_quick_parity)
   add_test(NAME test_csv_header_only COMMAND test_csv_header_only)
+  add_test(NAME test_energy_and_penetration COMMAND test_energy_and_penetration)
 endif()

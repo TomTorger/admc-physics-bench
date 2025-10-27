@@ -3,6 +3,7 @@
 #include "math.hpp"
 
 #include <vector>
+#include <cstdint>
 
 using math::Mat3;
 using math::Quat;
@@ -33,6 +34,12 @@ struct RigidBody {
 
 //! Contact point description between two bodies.
 struct Contact {
+  enum class Type : std::uint8_t {
+    kUnknown = 0,
+    kSphereSphere,
+    kSpherePlane,
+  };
+
   int a = -1;
   int b = -1;
   Vec3 p;      //!< World contact point.
@@ -50,13 +57,18 @@ struct Contact {
   double e = 0.0;
   double mu = 0.0;
   double bias = 0.0;
-  double penetration = 0.0;
+  double bounce = 0.0; //!< Stored restitution target for scalar solvers.
+  double C = 0.0; //!< Constraint violation (negative when penetrating).
   double jn = 0.0; //!< Warm-start accumulator for normal impulse.
   double jt1 = 0.0; //!< Warm-start accumulator for first friction tangent.
   double jt2 = 0.0; //!< Warm-start accumulator for second friction tangent.
   double k_n = 0.0;
   double k_t1 = 0.0;
   double k_t2 = 0.0;
+  double radius_a = 0.0; //!< Optional cached radius for body a (spheres).
+  double radius_b = 0.0; //!< Optional cached radius for body b (spheres).
+  double plane_offset = 0.0; //!< Optional plane offset when involving a plane.
+  Type type = Type::kUnknown;
 };
 
 //! Structure-of-arrays representation of contacts for batched solves.
@@ -83,7 +95,8 @@ struct RowSOA {
   std::vector<double> mu;
   std::vector<double> e;
   std::vector<double> bias;
-  std::vector<double> penetration;
+  std::vector<double> bounce;
+  std::vector<double> C;
   std::vector<int> indices; //!< Mapping back to original contact indices.
 
   std::size_t size() const { return a.size(); }

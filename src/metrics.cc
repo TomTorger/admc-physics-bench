@@ -24,53 +24,25 @@ std::array<math::Vec3, 10> make_directions() {
 
 const std::array<math::Vec3, 10> kDirections = make_directions();
 
-double determinant(const math::Mat3& m) {
-  const auto& a = m.m;
-  return a[0] * (a[4] * a[8] - a[5] * a[7]) -
-         a[1] * (a[3] * a[8] - a[5] * a[6]) +
-         a[2] * (a[3] * a[7] - a[4] * a[6]);
-}
-
-bool invert(const math::Mat3& m, math::Mat3& out) {
-  const auto& a = m.m;
-  const double det = determinant(m);
-  if (std::fabs(det) <= math::kEps) {
+bool invert3x3(const math::Mat3& A, math::Mat3& Ainv, double eps = 1e-12) {
+  const auto& m = A.m;
+  const double det = m[0] * (m[4] * m[8] - m[5] * m[7]) -
+                     m[1] * (m[3] * m[8] - m[5] * m[6]) +
+                     m[2] * (m[3] * m[7] - m[4] * m[6]);
+  if (std::fabs(det) <= eps) {
     return false;
   }
   const double inv_det = 1.0 / det;
-  out = math::Mat3({{(a[4] * a[8] - a[5] * a[7]) * inv_det,
-                     (a[2] * a[7] - a[1] * a[8]) * inv_det,
-                     (a[1] * a[5] - a[2] * a[4]) * inv_det,
-                     (a[5] * a[6] - a[3] * a[8]) * inv_det,
-                     (a[0] * a[8] - a[2] * a[6]) * inv_det,
-                     (a[2] * a[3] - a[0] * a[5]) * inv_det,
-                     (a[3] * a[7] - a[4] * a[6]) * inv_det,
-                     (a[1] * a[6] - a[0] * a[7]) * inv_det,
-                     (a[0] * a[4] - a[1] * a[3]) * inv_det}});
+  Ainv = math::Mat3({{(m[4] * m[8] - m[5] * m[7]) * inv_det,
+                      (m[2] * m[7] - m[1] * m[8]) * inv_det,
+                      (m[1] * m[5] - m[2] * m[4]) * inv_det,
+                      (m[5] * m[6] - m[3] * m[8]) * inv_det,
+                      (m[0] * m[8] - m[2] * m[6]) * inv_det,
+                      (m[2] * m[3] - m[0] * m[5]) * inv_det,
+                      (m[3] * m[7] - m[4] * m[6]) * inv_det,
+                      (m[1] * m[6] - m[0] * m[7]) * inv_det,
+                      (m[0] * m[4] - m[1] * m[3]) * inv_det}});
   return true;
-}
-
-math::Vec3 solve(const math::Mat3& A, const math::Vec3& b) {
-  math::Mat3 inv;
-  if (!invert(A, inv)) {
-    return math::Vec3();
-  }
-  return inv * b;
-}
-
-double total_energy(const std::vector<RigidBody>& bodies) {
-  double energy = 0.0;
-  for (const RigidBody& b : bodies) {
-    if (b.invMass > math::kEps) {
-      const double mass = 1.0 / b.invMass;
-      energy += 0.5 * mass * math::dot(b.v, b.v);
-    }
-    if (math::length2(b.w) > math::kEps * math::kEps) {
-      math::Vec3 L = solve(b.invInertiaWorld, b.w);
-      energy += 0.5 * math::dot(b.w, L);
-    }
-  }
-  return energy;
 }
 
 inline double directional_sum(const std::vector<RigidBody>& bodies,
@@ -102,15 +74,33 @@ Drift directional_momentum_drift(const std::vector<RigidBody>& pre,
 double constraint_penetration_Linf(const std::vector<Contact>& contacts) {
   double max_pen = 0.0;
   for (const Contact& c : contacts) {
-    max_pen = std::max(max_pen, std::fabs(c.penetration));
+    max_pen = std::max(max_pen, std::max(0.0, -c.C));
   }
   return max_pen;
 }
 
+double kinetic_energy(const std::vector<RigidBody>& bodies) {
+  double energy = 0.0;
+  for (const RigidBody& b : bodies) {
+    if (b.invMass > math::kEps) {
+      const double mass = 1.0 / b.invMass;
+      energy += 0.5 * mass * math::dot(b.v, b.v);
+    }
+    if (math::length2(b.w) > math::kEps * math::kEps) {
+      math::Mat3 inertia;
+      if (invert3x3(b.invInertiaWorld, inertia)) {
+        const math::Vec3 ang_momentum = inertia * b.w;
+        energy += 0.5 * math::dot(b.w, ang_momentum);
+      }
+    }
+  }
+  return energy;
+}
+
 double energy_drift(const std::vector<RigidBody>& pre,
                     const std::vector<RigidBody>& post) {
-  const double before = total_energy(pre);
-  const double after = total_energy(post);
+  const double before = kinetic_energy(pre);
+  const double after = kinetic_energy(post);
   return after - before;
 }
 

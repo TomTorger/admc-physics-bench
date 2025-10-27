@@ -57,16 +57,17 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     c.ra = c.p - A.x;
     c.rb = c.p - B.x;
 
-    if (std::fabs(c.penetration) <= math::kEps) {
-      c.penetration = 0.0;
-    }
+    const math::Vec3 va = A.v + math::cross(A.w, c.ra);
+    const math::Vec3 vb = B.v + math::cross(B.w, c.rb);
+    const double v_rel_n_initial = math::dot(c.n, vb - va);
 
-    double depth = 0.0;
-    if (c.penetration < -params.slop) {
-      depth = -c.penetration - params.slop;
+    if (std::fabs(c.C) <= math::kEps) {
+      c.C = 0.0;
     }
-    c.bias = -beta_dt * depth;
-    c.e = std::max(c.e, params.restitution);
+    const double restitution = std::max(c.e, params.restitution);
+    c.e = restitution;
+    c.bias = -beta_dt * std::max(0.0, -c.C - params.slop);
+    c.bounce = (v_rel_n_initial < 0.0) ? (-restitution * v_rel_n_initial) : 0.0;
     c.mu = std::max(c.mu, params.mu);
 
     c.ra_cross_n = math::cross(c.ra, c.n);
@@ -94,7 +95,7 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     k_t2 += math::dot(c.ra_cross_t2, Iwa_t2) + math::dot(c.rb_cross_t2, Iwb_t2);
     c.k_t2 = (k_t2 > math::kEps) ? k_t2 : 1.0;
 
-    if (!params.warm_start) {
+    if (c.C >= -params.slop || !params.warm_start) {
       c.jn = 0.0;
       c.jt1 = 0.0;
       c.jt2 = 0.0;
@@ -166,12 +167,21 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       }
       RigidBody& A = bodies[c.a];
       RigidBody& B = bodies[c.b];
-      const Vec3 impulse = c.n * c.jn + c.t1 * c.jt1 + c.t2 * c.jt2;
-      if (math::length2(impulse) <= math::kEps) {
+      const double accum_mag =
+          std::max({std::fabs(c.jn), std::fabs(c.jt1), std::fabs(c.jt2)});
+      if (accum_mag <= math::kEps) {
         continue;
       }
-      A.applyImpulse(-impulse, c.ra);
-      B.applyImpulse(impulse, c.rb);
+      const Vec3 linear = c.n * c.jn + c.t1 * c.jt1 + c.t2 * c.jt2;
+      const Vec3 angular_a = c.ra_cross_n * c.jn + c.ra_cross_t1 * c.jt1 +
+                             c.ra_cross_t2 * c.jt2;
+      const Vec3 angular_b = c.rb_cross_n * c.jn + c.rb_cross_t1 * c.jt1 +
+                             c.rb_cross_t2 * c.jt2;
+
+      A.v -= linear * A.invMass;
+      A.w -= A.invInertiaWorld * angular_a;
+      B.v += linear * B.invMass;
+      B.w += B.invInertiaWorld * angular_b;
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -205,19 +215,20 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       const Vec3 v_rel = vb - va;
       const double v_rel_n = math::dot(c.n, v_rel);
 
-      double target = c.bias;
-      if (v_rel_n < 0.0) {
-        target += -c.e * v_rel_n;
-      }
+      const double rhs = -(v_rel_n + c.bias - c.bounce);
 
-      const double delta_jn = (target - v_rel_n) / c.k_n;
+      const double delta_jn = rhs / c.k_n;
       const double jn_old = c.jn;
       c.jn = std::max(0.0, c.jn + delta_jn);
       const double applied_n = c.jn - jn_old;
       if (std::fabs(applied_n) > math::kEps) {
-        const Vec3 impulse_n = applied_n * c.n;
-        A.applyImpulse(-impulse_n, c.ra);
-        B.applyImpulse(impulse_n, c.rb);
+        const Vec3 linear_n = applied_n * c.n;
+        const Vec3 angular_a = c.ra_cross_n * applied_n;
+        const Vec3 angular_b = c.rb_cross_n * applied_n;
+        A.v -= linear_n * A.invMass;
+        A.w -= A.invInertiaWorld * angular_a;
+        B.v += linear_n * B.invMass;
+        B.w += B.invInertiaWorld * angular_b;
       }
 
       const Vec3 va_f = A.v + math::cross(A.w, c.ra);
@@ -254,9 +265,13 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       c.jt2 = jt2_candidate;
 
       if (std::fabs(delta_jt1) > math::kEps || std::fabs(delta_jt2) > math::kEps) {
-        const Vec3 impulse_t = delta_jt1 * c.t1 + delta_jt2 * c.t2;
-        A.applyImpulse(-impulse_t, c.ra);
-        B.applyImpulse(impulse_t, c.rb);
+        const Vec3 linear_t = delta_jt1 * c.t1 + delta_jt2 * c.t2;
+        const Vec3 angular_a = c.ra_cross_t1 * delta_jt1 + c.ra_cross_t2 * delta_jt2;
+        const Vec3 angular_b = c.rb_cross_t1 * delta_jt1 + c.rb_cross_t2 * delta_jt2;
+        A.v -= linear_t * A.invMass;
+        A.w -= A.invInertiaWorld * angular_a;
+        B.v += linear_t * B.invMass;
+        B.w += B.invInertiaWorld * angular_b;
       }
     }
 

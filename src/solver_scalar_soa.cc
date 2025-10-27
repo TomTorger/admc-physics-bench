@@ -101,7 +101,8 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
   rows.mu.reserve(contacts.size());
   rows.e.reserve(contacts.size());
   rows.bias.reserve(contacts.size());
-  rows.penetration.reserve(contacts.size());
+  rows.bounce.reserve(contacts.size());
+  rows.C.reserve(contacts.size());
   rows.indices.reserve(contacts.size());
 
   const double beta_dt = (params.dt > math::kEps) ? (params.beta / params.dt) : 0.0;
@@ -134,18 +135,19 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
       rb = c.p - B.x;
     }
 
-    double penetration = c.penetration;
-    if (std::fabs(penetration) <= math::kEps) {
-      penetration = 0.0;
+    double violation = c.C;
+    if (std::fabs(violation) <= math::kEps) {
+      violation = 0.0;
     }
-    double depth = 0.0;
-    if (penetration < -params.slop) {
-      depth = -penetration - params.slop;
-    }
-    const double bias = -beta_dt * depth;
+    const double bias = -beta_dt * std::max(0.0, -violation - params.slop);
 
     const double restitution = std::max(c.e, params.restitution);
     const double mu = std::max(c.mu, params.mu);
+
+    const Vec3 va = A.v + math::cross(A.w, ra);
+    const Vec3 vb = B.v + math::cross(B.w, rb);
+    const double v_rel_n = math::dot(n, vb - va);
+    const double bounce = (v_rel_n < 0.0) ? (-restitution * v_rel_n) : 0.0;
 
     const Vec3 ra_cross_n = math::cross(ra, n);
     const Vec3 rb_cross_n = math::cross(rb, n);
@@ -195,13 +197,16 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     rows.k_n.push_back(k_n);
     rows.k_t1.push_back(k_t1);
     rows.k_t2.push_back(k_t2);
-    rows.jn.push_back(params.warm_start ? c.jn : 0.0);
-    rows.jt1.push_back(params.warm_start ? c.jt1 : 0.0);
-    rows.jt2.push_back(params.warm_start ? c.jt2 : 0.0);
+    const bool allow_warm_start = params.warm_start &&
+                                  (violation < -params.slop);
+    rows.jn.push_back(allow_warm_start ? c.jn : 0.0);
+    rows.jt1.push_back(allow_warm_start ? c.jt1 : 0.0);
+    rows.jt2.push_back(allow_warm_start ? c.jt2 : 0.0);
     rows.mu.push_back(mu);
     rows.e.push_back(restitution);
     rows.bias.push_back(bias);
-    rows.penetration.push_back(penetration);
+    rows.bounce.push_back(bounce);
+    rows.C.push_back(violation);
   }
 
   return rows;
@@ -257,8 +262,16 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       if (debug_info) {
         ++debug_info->warmstart_contact_impulses;
       }
-      A.applyImpulse(-impulse, rows.ra[i]);
-      B.applyImpulse(impulse, rows.rb[i]);
+      const Vec3 angular_a = rows.ra_cross_n[i] * rows.jn[i] +
+                             rows.ra_cross_t1[i] * rows.jt1[i] +
+                             rows.ra_cross_t2[i] * rows.jt2[i];
+      const Vec3 angular_b = rows.rb_cross_n[i] * rows.jn[i] +
+                             rows.rb_cross_t1[i] * rows.jt1[i] +
+                             rows.rb_cross_t2[i] * rows.jt2[i];
+      A.v -= impulse * A.invMass;
+      A.w -= A.invInertiaWorld * angular_a;
+      B.v += impulse * B.invMass;
+      B.w += B.invInertiaWorld * angular_b;
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -307,12 +320,9 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const Vec3 v_rel = vb - va;
       const double v_rel_n = math::dot(rows.n[i], v_rel);
 
-      double target = rows.bias[i];
-      if (v_rel_n < 0.0) {
-        target += -rows.e[i] * v_rel_n;
-      }
+      const double rhs = -(v_rel_n + rows.bias[i] - rows.bounce[i]);
 
-      const double delta_jn = (target - v_rel_n) / rows.k_n[i];
+      const double delta_jn = rhs / rows.k_n[i];
       const double jn_old = rows.jn[i];
       const double jn_candidate = rows.jn[i] + delta_jn;
       if (jn_candidate < 0.0 && debug_info) {
@@ -322,8 +332,12 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const double applied_n = rows.jn[i] - jn_old;
       if (std::fabs(applied_n) > math::kEps) {
         const Vec3 impulse_n = applied_n * rows.n[i];
-        A.applyImpulse(-impulse_n, rows.ra[i]);
-        B.applyImpulse(impulse_n, rows.rb[i]);
+        const Vec3 angular_a = rows.ra_cross_n[i] * applied_n;
+        const Vec3 angular_b = rows.rb_cross_n[i] * applied_n;
+        A.v -= impulse_n * A.invMass;
+        A.w -= A.invInertiaWorld * angular_a;
+        B.v += impulse_n * B.invMass;
+        B.w += B.invInertiaWorld * angular_b;
       }
 
       const Vec3 va_f = A.v + math::cross(A.w, rows.ra[i]);
@@ -363,8 +377,14 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
 
       if (std::fabs(delta_jt1) > math::kEps || std::fabs(delta_jt2) > math::kEps) {
         const Vec3 impulse_t = delta_jt1 * rows.t1[i] + delta_jt2 * rows.t2[i];
-        A.applyImpulse(-impulse_t, rows.ra[i]);
-        B.applyImpulse(impulse_t, rows.rb[i]);
+        const Vec3 angular_a = rows.ra_cross_t1[i] * delta_jt1 +
+                               rows.ra_cross_t2[i] * delta_jt2;
+        const Vec3 angular_b = rows.rb_cross_t1[i] * delta_jt1 +
+                               rows.rb_cross_t2[i] * delta_jt2;
+        A.v -= impulse_t * A.invMass;
+        A.w -= A.invInertiaWorld * angular_a;
+        B.v += impulse_t * B.invMass;
+        B.w += B.invInertiaWorld * angular_b;
       }
     }
 
@@ -443,7 +463,8 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     c.mu = rows.mu[i];
     c.e = rows.e[i];
     c.bias = rows.bias[i];
-    c.penetration = rows.penetration[i];
+    c.bounce = rows.bounce[i];
+    c.C = rows.C[i];
   }
 
   for (RigidBody& body : bodies) {

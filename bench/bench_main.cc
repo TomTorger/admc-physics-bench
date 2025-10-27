@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -78,6 +79,25 @@ void record_micro_result(const MicrobenchResult& result) {
 void write_results_csv();
 void write_microbench_csv();
 void print_results_table();
+
+void configure_baseline_params(const std::string& scene_name,
+                               BaselineParams& params) {
+  if (scene_name == "two_spheres") {
+    params.beta = 0.0;
+    params.slop = 0.0;
+    params.restitution = 1.0;
+  }
+}
+
+void configure_solver_params(const std::string& scene_name,
+                             SolverParams& params) {
+  if (scene_name == "two_spheres") {
+    params.beta = 0.0;
+    params.slop = 0.0;
+    params.restitution = 1.0;
+    params.mu = 0.0;
+  }
+}
 
 struct CliOptions {
   bool run_cli = false;
@@ -198,6 +218,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
   std::vector<DistanceJoint> joints = base_scene.joints;
+  refresh_contacts_from_state(bodies, contacts);
   const std::vector<RigidBody> pre = bodies;
 
   const auto start = std::chrono::steady_clock::now();
@@ -206,29 +227,35 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     BaselineParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
+    configure_baseline_params(scene_name, params);
     for (int step = 0; step < safe_steps; ++step) {
       build_contact_offsets_and_bias(bodies, contacts, params);
       solve_baseline(bodies, contacts, params);
     }
+    refresh_contacts_from_state(bodies, contacts);
   } else if (normalized == "cached") {
     SolverParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
+    configure_solver_params(scene_name, params);
     for (int step = 0; step < safe_steps; ++step) {
       build_contact_offsets_and_bias(bodies, contacts, params);
       build_distance_joint_rows(bodies, joints, params.dt);
       solve_scalar_cached(bodies, contacts, joints, params);
     }
     build_distance_joint_rows(bodies, joints, params.dt);
+    refresh_contacts_from_state(bodies, contacts);
   } else if (normalized == "soa") {
     SolverParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
+    configure_solver_params(scene_name, params);
     for (int step = 0; step < safe_steps; ++step) {
       build_contact_offsets_and_bias(bodies, contacts, params);
       RowSOA rows = build_soa(bodies, contacts, params);
       solve_scalar_soa(bodies, contacts, rows, params);
     }
+    refresh_contacts_from_state(bodies, contacts);
   } else {
     std::cerr << "Unknown solver: " << solver_name << "\n";
     return std::nullopt;
@@ -270,10 +297,10 @@ void run_default_suite(const std::string& csv_path) {
   };
 
   constexpr double kDefaultDt = 1.0 / 60.0;
-  const QuickCase cases[] = {
-      {"two_spheres", "baseline", 10, 10},
-      {"two_spheres", "cached", 10, 10},
-      {"two_spheres", "soa", 10, 10},
+  std::vector<QuickCase> cases = {
+      {"two_spheres", "baseline", 10, 1},
+      {"two_spheres", "cached", 10, 1},
+      {"two_spheres", "soa", 10, 1},
       {"spheres_cloud_1024", "baseline", 10, 30},
       {"spheres_cloud_1024", "cached", 10, 30},
       {"spheres_cloud_1024", "soa", 10, 30},
@@ -282,8 +309,14 @@ void run_default_suite(const std::string& csv_path) {
       {"box_stack_4", "soa", 10, 30},
   };
 
+  const char* run_large_env = std::getenv("RUN_LARGE");
+  if (run_large_env && std::string(run_large_env) == "1") {
+    cases.push_back({"spheres_cloud_8192", "cached", 10, 30});
+    cases.push_back({"spheres_cloud_8192", "soa", 10, 30});
+  }
+
   std::vector<BenchmarkResult> results;
-  results.reserve(std::size(cases));
+  results.reserve(cases.size());
 
   for (const QuickCase& qc : cases) {
     Scene scene;
