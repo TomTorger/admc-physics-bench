@@ -54,6 +54,12 @@ struct Contact {
   Vec3 rb_cross_t1;
   Vec3 ra_cross_t2;
   Vec3 rb_cross_t2;
+  Vec3 TWn_a;
+  Vec3 TWn_b;
+  Vec3 TWt1_a;
+  Vec3 TWt1_b;
+  Vec3 TWt2_a;
+  Vec3 TWt2_b;
   double e = 0.0;
   double mu = 0.0;
   double bias = 0.0;

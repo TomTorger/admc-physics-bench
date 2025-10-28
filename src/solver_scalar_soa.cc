@@ -206,12 +206,12 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     const Vec3 ra_cross_t2 = c.ra_cross_t2;
     const Vec3 rb_cross_t2 = c.rb_cross_t2;
 
-    const Vec3 TWn_a = A.invInertiaWorld * ra_cross_n;
-    const Vec3 TWn_b = B.invInertiaWorld * rb_cross_n;
-    const Vec3 TWt1_a = A.invInertiaWorld * ra_cross_t1;
-    const Vec3 TWt1_b = B.invInertiaWorld * rb_cross_t1;
-    const Vec3 TWt2_a = A.invInertiaWorld * ra_cross_t2;
-    const Vec3 TWt2_b = B.invInertiaWorld * rb_cross_t2;
+    const Vec3 TWn_a = c.TWn_a;
+    const Vec3 TWn_b = c.TWn_b;
+    const Vec3 TWt1_a = c.TWt1_a;
+    const Vec3 TWt1_b = c.TWt1_b;
+    const Vec3 TWt2_a = c.TWt2_a;
+    const Vec3 TWt2_b = c.TWt2_b;
 
     const double k_n = (c.k_n > math::kEps) ? c.k_n : 1.0;
     const double k_t1 = (c.k_t1 > math::kEps) ? c.k_t1 : 1.0;
@@ -287,9 +287,10 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     rows.inv_k_t1[write_index] = 1.0 / k_t1;
     rows.inv_k_t2[write_index] = 1.0 / k_t2;
     const bool allow_warm_start = params.warm_start && (violation < -params.slop);
+    const bool allow_friction_warmstart = allow_warm_start && (mu > math::kEps);
     rows.jn[write_index] = allow_warm_start ? c.jn : 0.0;
-    rows.jt1[write_index] = allow_warm_start ? c.jt1 : 0.0;
-    rows.jt2[write_index] = allow_warm_start ? c.jt2 : 0.0;
+    rows.jt1[write_index] = allow_friction_warmstart ? c.jt1 : 0.0;
+    rows.jt2[write_index] = allow_friction_warmstart ? c.jt2 : 0.0;
     rows.mu[write_index] = mu;
     rows.e[write_index] = restitution;
     rows.bias[write_index] = bias;
@@ -353,17 +354,16 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const double jt1 = rows.jt1[i];
       const double jt2 = rows.jt2[i];
 
+      if (std::fabs(jn) <= math::kEps && std::fabs(jt1) <= math::kEps &&
+          std::fabs(jt2) <= math::kEps) {
+        continue;
+      }
       const double impulse_x = rows.nx[i] * jn + rows.t1x[i] * jt1 +
                                rows.t2x[i] * jt2;
       const double impulse_y = rows.ny[i] * jn + rows.t1y[i] * jt1 +
                                rows.t2y[i] * jt2;
       const double impulse_z = rows.nz[i] * jn + rows.t1z[i] * jt1 +
                                rows.t2z[i] * jt2;
-      const double impulse_len2 = impulse_x * impulse_x + impulse_y * impulse_y +
-                                  impulse_z * impulse_z;
-      if (impulse_len2 <= math::kEps * math::kEps) {
-        continue;
-      }
       if (debug_info) {
         ++debug_info->warmstart_contact_impulses;
       }
@@ -509,6 +509,13 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
         B.w.z += applied_n * rows.TWn_b_z[i];
       }
 
+      const double mu = rows.mu[i];
+      if (mu <= math::kEps) {
+        rows.jt1[i] = 0.0;
+        rows.jt2[i] = 0.0;
+        continue;
+      }
+
       const double t1x = rows.t1x[i];
       const double t1y = rows.t1y[i];
       const double t1z = rows.t1z[i];
@@ -561,7 +568,7 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       double jt2_candidate =
           rows.jt2[i] + (-v_rel_t2) * rows.inv_k_t2[i];
 
-      const double friction_max = rows.mu[i] * std::max(rows.jn[i], 0.0);
+      const double friction_max = mu * std::max(rows.jn[i], 0.0);
       const double jt_mag =
           std::sqrt(jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate);
       double scale = 1.0;
