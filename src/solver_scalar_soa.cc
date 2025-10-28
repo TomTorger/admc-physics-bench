@@ -345,10 +345,11 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
 
   const auto warmstart_begin = Clock::now();
   if (!params.warm_start) {
-    std::fill(rows.jn.begin(), rows.jn.end(), 0.0);
-    std::fill(rows.jt1.begin(), rows.jt1.end(), 0.0);
-    std::fill(rows.jt2.begin(), rows.jt2.end(), 0.0);
-    std::fill(joints.j.begin(), joints.j.end(), 0.0);
+    const std::size_t contact_count = rows.size();
+    std::fill_n(rows.jn.begin(), contact_count, 0.0);
+    std::fill_n(rows.jt1.begin(), contact_count, 0.0);
+    std::fill_n(rows.jt2.begin(), contact_count, 0.0);
+    std::fill_n(joints.j.begin(), joints.size(), 0.0);
   } else {
     for (std::size_t i = 0; i < rows.size(); ++i) {
       const int ia = rows.a[i];
@@ -460,17 +461,18 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
 
       const double invMassA = A.invMass;
       const double invMassB = B.invMass;
-      // Compute relative linear velocities once so the normal and tangential
-      // solves can reuse the deltas without repeating subtractions.
-      const double dvx = B.v.x - A.v.x;
-      const double dvy = B.v.y - A.v.y;
-      const double dvz = B.v.z - A.v.z;
-      const double wAx = A.w.x;
-      const double wAy = A.w.y;
-      const double wAz = A.w.z;
-      const double wBx = B.w.x;
-      const double wBy = B.w.y;
-      const double wBz = B.w.z;
+      // Cache the current relative kinematics so we can update them in-place
+      // as impulses are applied. This avoids reloading body velocities when
+      // computing the tangential solve.
+      double dvx = B.v.x - A.v.x;
+      double dvy = B.v.y - A.v.y;
+      double dvz = B.v.z - A.v.z;
+      double wAx = A.w.x;
+      double wAy = A.w.y;
+      double wAz = A.w.z;
+      double wBx = B.w.x;
+      double wBy = B.w.y;
+      double wBz = B.w.z;
 
       const double nx = rows.nx[i];
       const double ny = rows.ny[i];
@@ -507,6 +509,7 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
         const double impulse_x = applied_n * nx;
         const double impulse_y = applied_n * ny;
         const double impulse_z = applied_n * nz;
+        const double inv_mass_sum = invMassA + invMassB;
 
         A.v.x -= impulse_x * invMassA;
         A.v.y -= impulse_y * invMassA;
@@ -515,12 +518,30 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
         B.v.y += impulse_y * invMassB;
         B.v.z += impulse_z * invMassB;
 
-        A.w.x -= applied_n * rows.TWn_a_x[i];
-        A.w.y -= applied_n * rows.TWn_a_y[i];
-        A.w.z -= applied_n * rows.TWn_a_z[i];
-        B.w.x += applied_n * rows.TWn_b_x[i];
-        B.w.y += applied_n * rows.TWn_b_y[i];
-        B.w.z += applied_n * rows.TWn_b_z[i];
+        dvx += impulse_x * inv_mass_sum;
+        dvy += impulse_y * inv_mass_sum;
+        dvz += impulse_z * inv_mass_sum;
+
+        const double TWn_ax = rows.TWn_a_x[i];
+        const double TWn_ay = rows.TWn_a_y[i];
+        const double TWn_az = rows.TWn_a_z[i];
+        const double TWn_bx = rows.TWn_b_x[i];
+        const double TWn_by = rows.TWn_b_y[i];
+        const double TWn_bz = rows.TWn_b_z[i];
+
+        A.w.x -= applied_n * TWn_ax;
+        A.w.y -= applied_n * TWn_ay;
+        A.w.z -= applied_n * TWn_az;
+        B.w.x += applied_n * TWn_bx;
+        B.w.y += applied_n * TWn_by;
+        B.w.z += applied_n * TWn_bz;
+
+        wAx -= applied_n * TWn_ax;
+        wAy -= applied_n * TWn_ay;
+        wAz -= applied_n * TWn_az;
+        wBx += applied_n * TWn_bx;
+        wBy += applied_n * TWn_by;
+        wBz += applied_n * TWn_bz;
       }
 
       const double mu = rows.mu[i];
@@ -550,30 +571,19 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const double rbxt2_y = rows.rbxt2_y[i];
       const double rbxt2_z = rows.rbxt2_z[i];
 
-      const double dvx_post = B.v.x - A.v.x;
-      const double dvy_post = B.v.y - A.v.y;
-      const double dvz_post = B.v.z - A.v.z;
-
-      const double wAx_post = A.w.x;
-      const double wAy_post = A.w.y;
-      const double wAz_post = A.w.z;
-      const double wBx_post = B.w.x;
-      const double wBy_post = B.w.y;
-      const double wBz_post = B.w.z;
-
       const double wA_dot_raxt1 =
-          wAx_post * raxt1_x + wAy_post * raxt1_y + wAz_post * raxt1_z;
+          wAx * raxt1_x + wAy * raxt1_y + wAz * raxt1_z;
       const double wB_dot_rbxt1 =
-          wBx_post * rbxt1_x + wBy_post * rbxt1_y + wBz_post * rbxt1_z;
+          wBx * rbxt1_x + wBy * rbxt1_y + wBz * rbxt1_z;
       const double wA_dot_raxt2 =
-          wAx_post * raxt2_x + wAy_post * raxt2_y + wAz_post * raxt2_z;
+          wAx * raxt2_x + wAy * raxt2_y + wAz * raxt2_z;
       const double wB_dot_rbxt2 =
-          wBx_post * rbxt2_x + wBy_post * rbxt2_y + wBz_post * rbxt2_z;
+          wBx * rbxt2_x + wBy * rbxt2_y + wBz * rbxt2_z;
 
-      const double v_rel_t1 = t1x * dvx_post + t1y * dvy_post + t1z * dvz_post +
+      const double v_rel_t1 = t1x * dvx + t1y * dvy + t1z * dvz +
                               wB_dot_rbxt1 - wA_dot_raxt1;
 
-      const double v_rel_t2 = t2x * dvx_post + t2y * dvy_post + t2z * dvz_post +
+      const double v_rel_t2 = t2x * dvx + t2y * dvy + t2z * dvz +
                               wB_dot_rbxt2 - wA_dot_raxt2;
 
       double jt1_candidate =
@@ -583,10 +593,12 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
           rows.jt2[i] + (-v_rel_t2) * rows.inv_k_t2[i];
 
       const double friction_max = mu * std::max(rows.jn[i], 0.0);
-      const double jt_mag =
-          std::sqrt(jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate);
+      const double jt_mag_sq = jt1_candidate * jt1_candidate +
+                               jt2_candidate * jt2_candidate;
+      const double friction_max_sq = friction_max * friction_max;
       double scale = 1.0;
-      if (jt_mag > friction_max && jt_mag > math::kEps) {
+      if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
+        const double jt_mag = std::sqrt(jt_mag_sq);
         scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
         if (debug_info) {
           ++debug_info->tangent_projections;
