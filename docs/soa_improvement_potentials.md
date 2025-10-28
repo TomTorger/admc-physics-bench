@@ -64,3 +64,25 @@ Row construction is now ~6.6× faster than the previous 7.091 ms snapshot and 
 - Fold the tangential solve into a true SIMD batch so we amortize the remaining dot/cross math across contacts when friction is active.
 - Reuse `RowSOA` capacity across frames (e.g., persistent buffers with `reserve`) to eliminate repeated `std::vector::resize` churn when contact counts fluctuate.
 - Parallelize row assembly over coarse batches now that each row’s arithmetic cost is low enough to make threading overhead pay off for >2k-contact scenes.
+
+### 2024-05-10 — Persistent SoA buffers & lean scatter
+
+**Implemented**
+
+- Keep `RowSOA` and `JointSOA` buffers alive across steps with in-place builders so the solver reuses capacity instead of reallocating every frame.
+- Update the benchmark harness and tests to capture SoA buffers by value (with `mutable` lambdas), letting repeated steps share the same storage.
+- Reduce contact scatter to the warm-start scalars and material terms, trimming ~100B of writes per contact.
+
+**Benchmark snapshot (Release, `./build/bench/bench`)**
+
+| Scene | Steps | Iterations | ms/step | Contact build (ms) | Row build (ms) | Solver (ms) | Warm start (ms) | Iterations (ms) | Integration (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `spheres_cloud_1024` | 30 | 10 | 2.503 | 0.406 | 0.556 | 1.539 | 0.016 | 1.258 | 0.156 |
+
+Row scatter now measures at ~0 ms per step and the row builder no longer spikes allocations when contact counts fluctuate. Solver iterations continue to dominate (~62% of the frame), so future effort should target the iteration math rather than data marshaling.
+
+**Next ideas**
+
+- Fuse the normal/tangent angular dot products so tangential rows can reuse the work computed for the normal solve (or batch both into a small SIMD kernel).
+- Cache per-body angular velocities used by adjacent contacts within the iteration loop to lower repeated loads before pursuing wider SIMD.
+- Explore a coarse-grained row build job system (>2k contacts) to overlap contact prep and SoA packing when multiple threads are available.

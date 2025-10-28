@@ -609,12 +609,13 @@ void BenchSpheresCloudSoA4096(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        RowSOA rows = build_soa(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -700,12 +701,13 @@ void BenchSpheresCloudSoA8192(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        RowSOA rows = build_soa(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -791,12 +793,13 @@ void BenchBoxStackSoA(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
         build_contact_offsets_and_bias(bodies, contacts, params);
-        RowSOA rows = build_soa(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -854,11 +857,12 @@ void BenchPendulumSoA(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
-        RowSOA rows = build_soa(bodies, contacts, params);
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -915,11 +919,12 @@ void BenchChainSoA(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
-        RowSOA rows = build_soa(bodies, contacts, params);
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -976,11 +981,12 @@ void BenchRopeSoA(benchmark::State& state) {
 
   const double ms_per_step = run_benchmark_loop(
       state, base_scene,
-      [&](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
-          std::vector<DistanceJoint>& joints) {
-        RowSOA rows = build_soa(bodies, contacts, params);
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_soa(bodies, contacts, params, rows);
         build_distance_joint_rows(bodies, joints, params.dt);
-        JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
         solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
         scatter_joint_impulses(joint_rows, joints);
       });
@@ -1008,6 +1014,8 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
   SolverDebugInfo aggregate_debug;
   SoaTimingBreakdown total_timings;
   aggregate_debug.reset();
+  RowSOA rows;
+  JointSOA joint_rows;
   for (int i = 0; i < steps; ++i) {
     SolverDebugInfo step_debug;
     SoaTimingBreakdown step_timings;
@@ -1019,7 +1027,7 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
     step_timings.contact_prep_ms += elapsed_ms(contact_begin, contact_end);
 
     const auto row_begin = Clock::now();
-    RowSOA rows = build_soa(bodies, contacts, params);
+    build_soa(bodies, contacts, params, rows);
     const auto row_end = Clock::now();
     step_timings.row_build_ms += elapsed_ms(row_begin, row_end);
 
@@ -1030,7 +1038,7 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
         elapsed_ms(joint_distance_begin, joint_distance_end);
 
     const auto joint_pack_begin = Clock::now();
-    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+    build_joint_soa(bodies, joints, params.dt, joint_rows);
     const auto joint_pack_end = Clock::now();
     step_timings.joint_pack_ms += elapsed_ms(joint_pack_begin, joint_pack_end);
 
@@ -1460,14 +1468,16 @@ void MicrobenchSoaMtScaling(benchmark::State& state) {
 
   double total_elapsed = 0.0;
   int iterations = 0;
+  RowSOA rows;
+  JointSOA joint_rows;
   for (auto _ : state) {
     std::vector<RigidBody> bodies = base_scene.bodies;
     std::vector<Contact> contacts = base_scene.contacts;
     std::vector<DistanceJoint> joints = base_scene.joints;
     build_contact_offsets_and_bias(bodies, contacts, params);
-    RowSOA rows = build_soa(bodies, contacts, params);
+    build_soa(bodies, contacts, params, rows);
     build_distance_joint_rows(bodies, joints, params.dt);
-    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+    build_joint_soa(bodies, joints, params.dt, joint_rows);
     auto start = std::chrono::steady_clock::now();
     solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
     auto end = std::chrono::steady_clock::now();

@@ -88,82 +88,84 @@ std::string solver_debug_summary(const SolverDebugInfo& info) {
   return oss.str();
 }
 
-RowSOA build_soa(const std::vector<RigidBody>& bodies,
-                 const std::vector<Contact>& contacts,
-                 const SoaParams& params) {
-  RowSOA rows;
+void build_soa(const std::vector<RigidBody>& bodies,
+               const std::vector<Contact>& contacts,
+               const SoaParams& params,
+               RowSOA& rows) {
   const std::size_t capacity = contacts.size();
-  auto resize_all = [&](std::size_t size) {
-    rows.a.resize(size);
-    rows.b.resize(size);
-    rows.nx.resize(size);
-    rows.ny.resize(size);
-    rows.nz.resize(size);
-    rows.t1x.resize(size);
-    rows.t1y.resize(size);
-    rows.t1z.resize(size);
-    rows.t2x.resize(size);
-    rows.t2y.resize(size);
-    rows.t2z.resize(size);
-    rows.rax.resize(size);
-    rows.ray.resize(size);
-    rows.raz.resize(size);
-    rows.rbx.resize(size);
-    rows.rby.resize(size);
-    rows.rbz.resize(size);
-    rows.raxn_x.resize(size);
-    rows.raxn_y.resize(size);
-    rows.raxn_z.resize(size);
-    rows.rbxn_x.resize(size);
-    rows.rbxn_y.resize(size);
-    rows.rbxn_z.resize(size);
-    rows.raxt1_x.resize(size);
-    rows.raxt1_y.resize(size);
-    rows.raxt1_z.resize(size);
-    rows.rbxt1_x.resize(size);
-    rows.rbxt1_y.resize(size);
-    rows.rbxt1_z.resize(size);
-    rows.raxt2_x.resize(size);
-    rows.raxt2_y.resize(size);
-    rows.raxt2_z.resize(size);
-    rows.rbxt2_x.resize(size);
-    rows.rbxt2_y.resize(size);
-    rows.rbxt2_z.resize(size);
-    rows.TWn_a_x.resize(size);
-    rows.TWn_a_y.resize(size);
-    rows.TWn_a_z.resize(size);
-    rows.TWn_b_x.resize(size);
-    rows.TWn_b_y.resize(size);
-    rows.TWn_b_z.resize(size);
-    rows.TWt1_a_x.resize(size);
-    rows.TWt1_a_y.resize(size);
-    rows.TWt1_a_z.resize(size);
-    rows.TWt1_b_x.resize(size);
-    rows.TWt1_b_y.resize(size);
-    rows.TWt1_b_z.resize(size);
-    rows.TWt2_a_x.resize(size);
-    rows.TWt2_a_y.resize(size);
-    rows.TWt2_a_z.resize(size);
-    rows.TWt2_b_x.resize(size);
-    rows.TWt2_b_y.resize(size);
-    rows.TWt2_b_z.resize(size);
-    rows.k_n.resize(size);
-    rows.k_t1.resize(size);
-    rows.k_t2.resize(size);
-    rows.inv_k_n.resize(size);
-    rows.inv_k_t1.resize(size);
-    rows.inv_k_t2.resize(size);
-    rows.mu.resize(size);
-    rows.e.resize(size);
-    rows.bias.resize(size);
-    rows.bounce.resize(size);
-    rows.C.resize(size);
-    rows.jn.resize(size);
-    rows.jt1.resize(size);
-    rows.jt2.resize(size);
-    rows.indices.resize(size);
-  };
-  resize_all(capacity);
+  if (rows.indices.size() < capacity) {
+    auto resize_all = [&](std::size_t size) {
+      rows.a.resize(size);
+      rows.b.resize(size);
+      rows.nx.resize(size);
+      rows.ny.resize(size);
+      rows.nz.resize(size);
+      rows.t1x.resize(size);
+      rows.t1y.resize(size);
+      rows.t1z.resize(size);
+      rows.t2x.resize(size);
+      rows.t2y.resize(size);
+      rows.t2z.resize(size);
+      rows.rax.resize(size);
+      rows.ray.resize(size);
+      rows.raz.resize(size);
+      rows.rbx.resize(size);
+      rows.rby.resize(size);
+      rows.rbz.resize(size);
+      rows.raxn_x.resize(size);
+      rows.raxn_y.resize(size);
+      rows.raxn_z.resize(size);
+      rows.rbxn_x.resize(size);
+      rows.rbxn_y.resize(size);
+      rows.rbxn_z.resize(size);
+      rows.raxt1_x.resize(size);
+      rows.raxt1_y.resize(size);
+      rows.raxt1_z.resize(size);
+      rows.rbxt1_x.resize(size);
+      rows.rbxt1_y.resize(size);
+      rows.rbxt1_z.resize(size);
+      rows.raxt2_x.resize(size);
+      rows.raxt2_y.resize(size);
+      rows.raxt2_z.resize(size);
+      rows.rbxt2_x.resize(size);
+      rows.rbxt2_y.resize(size);
+      rows.rbxt2_z.resize(size);
+      rows.TWn_a_x.resize(size);
+      rows.TWn_a_y.resize(size);
+      rows.TWn_a_z.resize(size);
+      rows.TWn_b_x.resize(size);
+      rows.TWn_b_y.resize(size);
+      rows.TWn_b_z.resize(size);
+      rows.TWt1_a_x.resize(size);
+      rows.TWt1_a_y.resize(size);
+      rows.TWt1_a_z.resize(size);
+      rows.TWt1_b_x.resize(size);
+      rows.TWt1_b_y.resize(size);
+      rows.TWt1_b_z.resize(size);
+      rows.TWt2_a_x.resize(size);
+      rows.TWt2_a_y.resize(size);
+      rows.TWt2_a_z.resize(size);
+      rows.TWt2_b_x.resize(size);
+      rows.TWt2_b_y.resize(size);
+      rows.TWt2_b_z.resize(size);
+      rows.k_n.resize(size);
+      rows.k_t1.resize(size);
+      rows.k_t2.resize(size);
+      rows.inv_k_n.resize(size);
+      rows.inv_k_t1.resize(size);
+      rows.inv_k_t2.resize(size);
+      rows.mu.resize(size);
+      rows.e.resize(size);
+      rows.bias.resize(size);
+      rows.bounce.resize(size);
+      rows.C.resize(size);
+      rows.jn.resize(size);
+      rows.jt1.resize(size);
+      rows.jt2.resize(size);
+      rows.indices.resize(size);
+    };
+    resize_all(capacity);
+  }
 
   std::size_t write_index = 0;
 
@@ -300,16 +302,28 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     ++write_index;
   }
 
-  const std::size_t valid_rows = write_index;
-  resize_all(valid_rows);
-  rows.N = static_cast<int>(valid_rows);
-  return rows;
+  rows.N = static_cast<int>(write_index);
 }
 
 RowSOA build_soa(const std::vector<RigidBody>& bodies,
                  const std::vector<Contact>& contacts,
                  const SolverParams& params) {
   return build_soa(bodies, contacts, make_soa_params(params));
+}
+
+RowSOA build_soa(const std::vector<RigidBody>& bodies,
+                 const std::vector<Contact>& contacts,
+                 const SoaParams& params) {
+  RowSOA rows;
+  build_soa(bodies, contacts, params, rows);
+  return rows;
+}
+
+void build_soa(const std::vector<RigidBody>& bodies,
+               const std::vector<Contact>& contacts,
+               const SolverParams& params,
+               RowSOA& rows) {
+  build_soa(bodies, contacts, make_soa_params(params), rows);
 }
 
 void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
@@ -667,22 +681,6 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       continue;
     }
     Contact& c = contacts[static_cast<std::size_t>(idx)];
-    c.a = rows.a[i];
-    c.b = rows.b[i];
-    c.n = Vec3(rows.nx[i], rows.ny[i], rows.nz[i]);
-    c.t1 = Vec3(rows.t1x[i], rows.t1y[i], rows.t1z[i]);
-    c.t2 = Vec3(rows.t2x[i], rows.t2y[i], rows.t2z[i]);
-    c.ra = Vec3(rows.rax[i], rows.ray[i], rows.raz[i]);
-    c.rb = Vec3(rows.rbx[i], rows.rby[i], rows.rbz[i]);
-    c.ra_cross_n = Vec3(rows.raxn_x[i], rows.raxn_y[i], rows.raxn_z[i]);
-    c.rb_cross_n = Vec3(rows.rbxn_x[i], rows.rbxn_y[i], rows.rbxn_z[i]);
-    c.ra_cross_t1 = Vec3(rows.raxt1_x[i], rows.raxt1_y[i], rows.raxt1_z[i]);
-    c.rb_cross_t1 = Vec3(rows.rbxt1_x[i], rows.rbxt1_y[i], rows.rbxt1_z[i]);
-    c.ra_cross_t2 = Vec3(rows.raxt2_x[i], rows.raxt2_y[i], rows.raxt2_z[i]);
-    c.rb_cross_t2 = Vec3(rows.rbxt2_x[i], rows.rbxt2_y[i], rows.rbxt2_z[i]);
-    c.k_n = rows.k_n[i];
-    c.k_t1 = rows.k_t1[i];
-    c.k_t2 = rows.k_t2[i];
     c.jn = rows.jn[i];
     c.jt1 = rows.jt1[i];
     c.jt2 = rows.jt2[i];
@@ -712,19 +710,9 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
                              const SoaParams& params,
                              SolverDebugInfo* debug_info) {
   static JointSOA empty_joints;
-  empty_joints.a.clear();
-  empty_joints.b.clear();
-  empty_joints.d.clear();
-  empty_joints.ra.clear();
-  empty_joints.rb.clear();
-  empty_joints.k.clear();
-  empty_joints.gamma.clear();
-  empty_joints.bias.clear();
-  empty_joints.j.clear();
-  empty_joints.rope.clear();
-  empty_joints.C.clear();
-  empty_joints.indices.clear();
-  solve_scalar_soa_scalar(bodies, contacts, rows, empty_joints, params, debug_info);
+  empty_joints.clear();
+  solve_scalar_soa_scalar(bodies, contacts, rows, empty_joints, params,
+                          debug_info);
 }
 
 void solve_scalar_soa(std::vector<RigidBody>& bodies,

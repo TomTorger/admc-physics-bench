@@ -43,14 +43,18 @@ int main() {
   std::vector<DistanceJoint> joints_simd = scene.joints;
 
   build_contact_offsets_and_bias(bodies_scalar, contacts_scalar, params);
-  RowSOA rows_scalar = build_soa(bodies_scalar, contacts_scalar, params);
+  RowSOA rows_scalar;
+  build_soa(bodies_scalar, contacts_scalar, params, rows_scalar);
   build_distance_joint_rows(bodies_scalar, joints_scalar, params.dt);
-  JointSOA joint_rows_scalar = build_joint_soa(bodies_scalar, joints_scalar, params.dt);
+  JointSOA joint_rows_scalar;
+  build_joint_soa(bodies_scalar, joints_scalar, params.dt, joint_rows_scalar);
 
   build_contact_offsets_and_bias(bodies_simd, contacts_simd, params);
-  RowSOA rows_simd = build_soa(bodies_simd, contacts_simd, params);
+  RowSOA rows_simd;
+  build_soa(bodies_simd, contacts_simd, params, rows_simd);
   build_distance_joint_rows(bodies_simd, joints_simd, params.dt);
-  JointSOA joint_rows_simd = build_joint_soa(bodies_simd, joints_simd, params.dt);
+  JointSOA joint_rows_simd;
+  build_joint_soa(bodies_simd, joints_simd, params.dt, joint_rows_simd);
 
   SoaParams scalar_params = params;
   scalar_params.use_simd = false;

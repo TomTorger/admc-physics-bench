@@ -34,8 +34,10 @@ void run_cached_step(Scene& scene, const SolverParams& params) {
 
 void run_soa_step(Scene& scene, const SolverParams& params) {
   build_distance_joint_rows(scene.bodies, scene.joints, params.dt);
-  RowSOA rows = build_soa(scene.bodies, scene.contacts, params);
-  JointSOA joint_rows = build_joint_soa(scene.bodies, scene.joints, params.dt);
+  RowSOA rows;
+  build_soa(scene.bodies, scene.contacts, params, rows);
+  JointSOA joint_rows;
+  build_joint_soa(scene.bodies, scene.joints, params.dt, joint_rows);
   solve_scalar_soa(scene.bodies, scene.contacts, rows, joint_rows, params);
   scatter_joint_impulses(joint_rows, scene.joints);
 }

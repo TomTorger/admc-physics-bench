@@ -79,7 +79,8 @@ void test_elastic_energy_parity() {
   refresh_contacts_from_state(soa_scene.bodies, soa_scene.contacts);
   build_contact_offsets_and_bias(soa_scene.bodies, soa_scene.contacts,
                                  solver_params);
-  RowSOA rows = build_soa(soa_scene.bodies, soa_scene.contacts, solver_params);
+  RowSOA rows;
+  build_soa(soa_scene.bodies, soa_scene.contacts, solver_params, rows);
   solve_scalar_soa(soa_scene.bodies, soa_scene.contacts, rows, solver_params);
   const double soa_drift = energy_drift(soa_pre, soa_scene.bodies);
   if (std::fabs(soa_drift) >= 1e-10) {
