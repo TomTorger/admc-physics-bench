@@ -46,7 +46,8 @@ void test_frictionless_parity() {
   build_contact_offsets_and_bias(soa_scene.bodies, soa_scene.contacts, solver_params);
   SoaParams soa_params;
   static_cast<SolverParams&>(soa_params) = solver_params;
-  RowSOA rows = build_soa(soa_scene.bodies, soa_scene.contacts, soa_params);
+  RowSOA rows;
+  build_soa(soa_scene.bodies, soa_scene.contacts, soa_params, rows);
   solve_scalar_soa(soa_scene.bodies, soa_scene.contacts, rows, soa_params);
 
   const Drift drift = directional_momentum_drift(pre, cached_scene.bodies);

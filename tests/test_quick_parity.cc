@@ -66,7 +66,8 @@ int main() {
     solve_baseline(B1, C1, pb);
     solve_scalar_cached(B2, C2, ps);
 
-    RowSOA rows = build_soa(B3, C3, ps);
+    RowSOA rows;
+    build_soa(B3, C3, ps, rows);
     solve_scalar_soa(B3, C3, rows, ps);
 
     const double d12 = max_abs_diff(B1, B2);

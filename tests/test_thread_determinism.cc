@@ -32,9 +32,11 @@ void run_solver(const Scene& base_scene,
   std::vector<DistanceJoint> joints = base_scene.joints;
 
   build_contact_offsets_and_bias(bodies, contacts, params);
-  RowSOA rows = build_soa(bodies, contacts, params);
+  RowSOA rows;
+  build_soa(bodies, contacts, params, rows);
   build_distance_joint_rows(bodies, joints, params.dt);
-  JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+  JointSOA joint_rows;
+  build_joint_soa(bodies, joints, params.dt, joint_rows);
   solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
 
   *out_bodies = bodies;

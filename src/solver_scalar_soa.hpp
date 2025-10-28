@@ -86,9 +86,19 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
                  const std::vector<Contact>& contacts,
                  const SoaParams& params);
 
+void build_soa(const std::vector<RigidBody>& bodies,
+               const std::vector<Contact>& contacts,
+               const SoaParams& params,
+               RowSOA& rows);
+
 RowSOA build_soa(const std::vector<RigidBody>& bodies,
                  const std::vector<Contact>& contacts,
                  const SolverParams& params);
+
+void build_soa(const std::vector<RigidBody>& bodies,
+               const std::vector<Contact>& contacts,
+               const SolverParams& params,
+               RowSOA& rows);
 
 void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
                              std::vector<Contact>& contacts,

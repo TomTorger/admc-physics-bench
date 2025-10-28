@@ -39,22 +39,12 @@ void build_distance_joint_rows(const std::vector<RigidBody>& bodies,
   }
 }
 
-JointSOA build_joint_soa(const std::vector<RigidBody>& bodies,
-                         const std::vector<DistanceJoint>& joints,
-                         double dt) {
-  JointSOA rows;
-  rows.a.reserve(joints.size());
-  rows.b.reserve(joints.size());
-  rows.d.reserve(joints.size());
-  rows.ra.reserve(joints.size());
-  rows.rb.reserve(joints.size());
-  rows.k.reserve(joints.size());
-  rows.gamma.reserve(joints.size());
-  rows.bias.reserve(joints.size());
-  rows.j.reserve(joints.size());
-  rows.rope.reserve(joints.size());
-  rows.C.reserve(joints.size());
-  rows.indices.reserve(joints.size());
+void build_joint_soa(const std::vector<RigidBody>& bodies,
+                     const std::vector<DistanceJoint>& joints,
+                     double dt,
+                     JointSOA& rows) {
+  rows.clear();
+  rows.reserve(joints.size());
 
   const double dt_sq = (dt > math::kEps) ? (dt * dt) : 0.0;
   const double inv_dt = (dt > math::kEps) ? (1.0 / dt) : 0.0;
@@ -109,7 +99,13 @@ JointSOA build_joint_soa(const std::vector<RigidBody>& bodies,
     rows.rope.push_back(static_cast<uint8_t>(joint.rope ? 1 : 0));
     rows.C.push_back(joint.C);
   }
+}
 
+JointSOA build_joint_soa(const std::vector<RigidBody>& bodies,
+                         const std::vector<DistanceJoint>& joints,
+                         double dt) {
+  JointSOA rows;
+  build_joint_soa(bodies, joints, dt, rows);
   return rows;
 }
 
