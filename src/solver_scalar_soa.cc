@@ -15,7 +15,8 @@ Vec3 make_tangent(const Vec3& n) {
 }
 
 Vec3 orthonormalize(const Vec3& n, const Vec3& t) {
-  Vec3 tangent = math::normalize_safe(t);
+  Vec3 tangent = t - math::dot(t, n) * n;
+  tangent = math::normalize_safe(tangent);
   if (math::length2(tangent) <= math::kEps * math::kEps) {
     tangent = make_tangent(n);
   }
@@ -180,6 +181,9 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     if (std::fabs(violation) <= math::kEps) {
       violation = 0.0;
     }
+    // The scalar row formulation expects b = -beta/dt * C. We include a slop
+    // window here to match the documented stabilization strategy used in the
+    // solver configuration and avoid unnecessary correction of tiny errors.
     const double bias = -beta_dt * std::max(0.0, -violation - params.slop);
 
     const double restitution = std::max(c.e, params.restitution);
