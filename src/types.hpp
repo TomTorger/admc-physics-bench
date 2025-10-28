@@ -105,6 +105,8 @@ struct RowSOA {
 
   // Effective masses per direction
   std::vector<double> k_n, k_t1, k_t2;
+  // Cached reciprocals avoid divisions inside the solver hot loop.
+  std::vector<double> inv_k_n, inv_k_t1, inv_k_t2;
 
   // Material / bias terms per contact
   std::vector<double> mu, e, bias, bounce, C;
