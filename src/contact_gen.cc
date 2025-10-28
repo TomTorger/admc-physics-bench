@@ -55,7 +55,7 @@ bool refresh_contact_from_state_impl(const std::vector<RigidBody>& bodies,
         sphere_is_b ? c.n : (sphere_is_a ? -c.n : c.n));
 
     double plane_offset = c.plane_offset;
-    if (!std::isfinite(plane_offset) || std::fabs(plane_offset) <= math::kEps) {
+    if (!std::isfinite(plane_offset)) {
       plane_offset = math::dot(plane_normal, c.p);
     }
     c.plane_offset = plane_offset;
