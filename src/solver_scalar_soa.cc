@@ -137,6 +137,9 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
   rows.k_n.reserve(capacity);
   rows.k_t1.reserve(capacity);
   rows.k_t2.reserve(capacity);
+  rows.inv_k_n.reserve(capacity);
+  rows.inv_k_t1.reserve(capacity);
+  rows.inv_k_t2.reserve(capacity);
   rows.mu.reserve(capacity);
   rows.e.reserve(capacity);
   rows.bias.reserve(capacity);
@@ -282,6 +285,9 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     rows.k_n.push_back(k_n);
     rows.k_t1.push_back(k_t1);
     rows.k_t2.push_back(k_t2);
+    rows.inv_k_n.push_back(1.0 / k_n);
+    rows.inv_k_t1.push_back(1.0 / k_t1);
+    rows.inv_k_t2.push_back(1.0 / k_t2);
     const bool allow_warm_start = params.warm_start && (violation < -params.slop);
     rows.jn.push_back(allow_warm_start ? c.jn : 0.0);
     rows.jt1.push_back(allow_warm_start ? c.jt1 : 0.0);
@@ -427,25 +433,41 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       RigidBody& A = bodies[ia];
       RigidBody& B = bodies[ib];
 
+      const double invMassA = A.invMass;
+      const double invMassB = B.invMass;
+      // Compute relative linear velocities once so the normal and tangential
+      // solves can reuse the deltas without repeating subtractions.
+      const double dvx = B.v.x - A.v.x;
+      const double dvy = B.v.y - A.v.y;
+      const double dvz = B.v.z - A.v.z;
+      const double wAx = A.w.x;
+      const double wAy = A.w.y;
+      const double wAz = A.w.z;
+      const double wBx = B.w.x;
+      const double wBy = B.w.y;
+      const double wBz = B.w.z;
+
       const double nx = rows.nx[i];
       const double ny = rows.ny[i];
       const double nz = rows.nz[i];
 
-      const double v_rel_n =
-          nx * (B.v.x - A.v.x) + ny * (B.v.y - A.v.y) + nz * (B.v.z - A.v.z) +
-          (B.w.x * rows.rbxn_x[i] + B.w.y * rows.rbxn_y[i] +
-           B.w.z * rows.rbxn_z[i]) -
-          (A.w.x * rows.raxn_x[i] + A.w.y * rows.raxn_y[i] +
-           A.w.z * rows.raxn_z[i]);
+      const double raxn_x = rows.raxn_x[i];
+      const double raxn_y = rows.raxn_y[i];
+      const double raxn_z = rows.raxn_z[i];
+      const double rbxn_x = rows.rbxn_x[i];
+      const double rbxn_y = rows.rbxn_y[i];
+      const double rbxn_z = rows.rbxn_z[i];
+      const double wA_dot_raxn = wAx * raxn_x + wAy * raxn_y + wAz * raxn_z;
+      const double wB_dot_rbxn = wBx * rbxn_x + wBy * rbxn_y + wBz * rbxn_z;
+
+      const double v_rel_n = nx * dvx + ny * dvy + nz * dvz +
+                             wB_dot_rbxn - wA_dot_raxn;
 
       const double rhs = -(v_rel_n + rows.bias[i] - rows.bounce[i]);
 
-      double delta_jn = rhs;
-      if (rows.k_n[i] > math::kEps) {
-        delta_jn /= rows.k_n[i];
-      } else {
-        delta_jn = 0.0;
-      }
+      // Multiplying by the cached reciprocal avoids a divide in this hot loop;
+      // degenerate denominators were clamped during row construction.
+      const double delta_jn = rhs * rows.inv_k_n[i];
       const double jn_old = rows.jn[i];
       double jn_candidate = jn_old + delta_jn;
       if (jn_candidate < 0.0) {
@@ -461,12 +483,12 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
         const double impulse_y = applied_n * ny;
         const double impulse_z = applied_n * nz;
 
-        A.v.x -= impulse_x * A.invMass;
-        A.v.y -= impulse_y * A.invMass;
-        A.v.z -= impulse_z * A.invMass;
-        B.v.x += impulse_x * B.invMass;
-        B.v.y += impulse_y * B.invMass;
-        B.v.z += impulse_z * B.invMass;
+        A.v.x -= impulse_x * invMassA;
+        A.v.y -= impulse_y * invMassA;
+        A.v.z -= impulse_z * invMassA;
+        B.v.x += impulse_x * invMassB;
+        B.v.y += impulse_y * invMassB;
+        B.v.z += impulse_z * invMassB;
 
         A.w.x -= applied_n * rows.TWn_a_x[i];
         A.w.y -= applied_n * rows.TWn_a_y[i];
@@ -483,31 +505,35 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const double t2y = rows.t2y[i];
       const double t2z = rows.t2z[i];
 
+      const double raxt1_x = rows.raxt1_x[i];
+      const double raxt1_y = rows.raxt1_y[i];
+      const double raxt1_z = rows.raxt1_z[i];
+      const double rbxt1_x = rows.rbxt1_x[i];
+      const double rbxt1_y = rows.rbxt1_y[i];
+      const double rbxt1_z = rows.rbxt1_z[i];
+      const double raxt2_x = rows.raxt2_x[i];
+      const double raxt2_y = rows.raxt2_y[i];
+      const double raxt2_z = rows.raxt2_z[i];
+      const double rbxt2_x = rows.rbxt2_x[i];
+      const double rbxt2_y = rows.rbxt2_y[i];
+      const double rbxt2_z = rows.rbxt2_z[i];
+
+      const double wA_dot_raxt1 = wAx * raxt1_x + wAy * raxt1_y + wAz * raxt1_z;
+      const double wB_dot_rbxt1 = wBx * rbxt1_x + wBy * rbxt1_y + wBz * rbxt1_z;
+      const double wA_dot_raxt2 = wAx * raxt2_x + wAy * raxt2_y + wAz * raxt2_z;
+      const double wB_dot_rbxt2 = wBx * rbxt2_x + wBy * rbxt2_y + wBz * rbxt2_z;
+
       const double v_rel_t1 =
-          t1x * (B.v.x - A.v.x) + t1y * (B.v.y - A.v.y) +
-          t1z * (B.v.z - A.v.z) +
-          (B.w.x * rows.rbxt1_x[i] + B.w.y * rows.rbxt1_y[i] +
-           B.w.z * rows.rbxt1_z[i]) -
-          (A.w.x * rows.raxt1_x[i] + A.w.y * rows.raxt1_y[i] +
-           A.w.z * rows.raxt1_z[i]);
+          t1x * dvx + t1y * dvy + t1z * dvz + wB_dot_rbxt1 - wA_dot_raxt1;
 
       const double v_rel_t2 =
-          t2x * (B.v.x - A.v.x) + t2y * (B.v.y - A.v.y) +
-          t2z * (B.v.z - A.v.z) +
-          (B.w.x * rows.rbxt2_x[i] + B.w.y * rows.rbxt2_y[i] +
-           B.w.z * rows.rbxt2_z[i]) -
-          (A.w.x * rows.raxt2_x[i] + A.w.y * rows.raxt2_y[i] +
-           A.w.z * rows.raxt2_z[i]);
+          t2x * dvx + t2y * dvy + t2z * dvz + wB_dot_rbxt2 - wA_dot_raxt2;
 
-      double jt1_candidate = rows.jt1[i];
-      if (rows.k_t1[i] > math::kEps) {
-        jt1_candidate += (-v_rel_t1) / rows.k_t1[i];
-      }
+      double jt1_candidate =
+          rows.jt1[i] + (-v_rel_t1) * rows.inv_k_t1[i];
 
-      double jt2_candidate = rows.jt2[i];
-      if (rows.k_t2[i] > math::kEps) {
-        jt2_candidate += (-v_rel_t2) / rows.k_t2[i];
-      }
+      double jt2_candidate =
+          rows.jt2[i] + (-v_rel_t2) * rows.inv_k_t2[i];
 
       const double friction_max = rows.mu[i] * std::max(rows.jn[i], 0.0);
       const double jt_mag =
