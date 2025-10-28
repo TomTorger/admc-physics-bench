@@ -6,6 +6,47 @@
 #include <string>
 #include <thread>
 
+struct SoaTimingBreakdown {
+  double contact_prep_ms = 0.0;
+  double row_build_ms = 0.0;
+  double joint_distance_build_ms = 0.0;
+  double joint_pack_ms = 0.0;
+  double solver_total_ms = 0.0;
+  double solver_warmstart_ms = 0.0;
+  double solver_iterations_ms = 0.0;
+  double solver_integrate_ms = 0.0;
+  double scatter_ms = 0.0;
+  double total_step_ms = 0.0;
+
+  void reset() { *this = SoaTimingBreakdown{}; }
+
+  void accumulate(const SoaTimingBreakdown& other) {
+    contact_prep_ms += other.contact_prep_ms;
+    row_build_ms += other.row_build_ms;
+    joint_distance_build_ms += other.joint_distance_build_ms;
+    joint_pack_ms += other.joint_pack_ms;
+    solver_total_ms += other.solver_total_ms;
+    solver_warmstart_ms += other.solver_warmstart_ms;
+    solver_iterations_ms += other.solver_iterations_ms;
+    solver_integrate_ms += other.solver_integrate_ms;
+    scatter_ms += other.scatter_ms;
+    total_step_ms += other.total_step_ms;
+  }
+
+  void scale(double factor) {
+    contact_prep_ms *= factor;
+    row_build_ms *= factor;
+    joint_distance_build_ms *= factor;
+    joint_pack_ms *= factor;
+    solver_total_ms *= factor;
+    solver_warmstart_ms *= factor;
+    solver_iterations_ms *= factor;
+    solver_integrate_ms *= factor;
+    scatter_ms *= factor;
+    total_step_ms *= factor;
+  }
+};
+
 struct SolverDebugInfo {
   int invalid_contact_indices = 0;
   int invalid_joint_indices = 0;
@@ -15,6 +56,7 @@ struct SolverDebugInfo {
   int tangent_projections = 0;
   int rope_clamps = 0;
   int singular_joint_denominators = 0;
+  SoaTimingBreakdown timings;
 
   void reset() { *this = SolverDebugInfo{}; }
 
@@ -27,6 +69,7 @@ struct SolverDebugInfo {
     tangent_projections += other.tangent_projections;
     rope_clamps += other.rope_clamps;
     singular_joint_denominators += other.singular_joint_denominators;
+    timings.accumulate(other.timings);
   }
 };
 

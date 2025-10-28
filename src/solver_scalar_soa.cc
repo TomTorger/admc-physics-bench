@@ -1,11 +1,19 @@
 #include "solver_scalar_soa.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <sstream>
 
 namespace {
 using math::Vec3;
+
+using Clock = std::chrono::steady_clock;
+using DurationMs = std::chrono::duration<double, std::milli>;
+
+double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
+  return DurationMs(end - begin).count();
+}
 
 Vec3 make_tangent(const Vec3& n) {
   if (std::fabs(n.x) < 0.57735026919) {
@@ -72,7 +80,11 @@ std::string solver_debug_summary(const SolverDebugInfo& info) {
       << ", normal_clamps=" << info.normal_impulse_clamps
       << ", tangent_projections=" << info.tangent_projections
       << ", rope_clamps=" << info.rope_clamps
-      << ", singular_joint_denoms=" << info.singular_joint_denominators;
+      << ", singular_joint_denoms=" << info.singular_joint_denominators
+      << ", solver_ms=" << info.timings.solver_total_ms
+      << ", warmstart_ms=" << info.timings.solver_warmstart_ms
+      << ", iteration_ms=" << info.timings.solver_iterations_ms
+      << ", integrate_ms=" << info.timings.solver_integrate_ms;
   return oss.str();
 }
 
@@ -305,6 +317,7 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
                              JointSOA& joints,
                              const SoaParams& params,
                              SolverDebugInfo* debug_info) {
+  const auto solver_begin = Clock::now();
   const int iterations = std::max(1, params.iterations);
 
   if (debug_info) {
@@ -315,6 +328,7 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     body.syncDerived();
   }
 
+  const auto warmstart_begin = Clock::now();
   if (!params.warm_start) {
     std::fill(rows.jn.begin(), rows.jn.end(), 0.0);
     std::fill(rows.jt1.begin(), rows.jt1.end(), 0.0);
@@ -408,6 +422,13 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     }
   }
 
+  if (debug_info) {
+    const auto warmstart_end = Clock::now();
+    debug_info->timings.solver_warmstart_ms +=
+        elapsed_ms(warmstart_begin, warmstart_end);
+  }
+
+  const auto iteration_begin = Clock::now();
   for (int it = 0; it < iterations; ++it) {
     for (std::size_t i = 0; i < rows.size(); ++i) {
       const int ia = rows.a[i];
@@ -624,6 +645,12 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     }
   }
 
+  if (debug_info) {
+    const auto iteration_end = Clock::now();
+    debug_info->timings.solver_iterations_ms +=
+        elapsed_ms(iteration_begin, iteration_end);
+  }
+
   for (std::size_t i = 0; i < rows.size(); ++i) {
     const int idx = rows.indices[i];
     if (idx < 0 || idx >= static_cast<int>(contacts.size())) {
@@ -659,8 +686,16 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     c.C = rows.C[i];
   }
 
+  const auto integrate_begin = Clock::now();
   for (RigidBody& body : bodies) {
     body.integrate(params.dt);
+  }
+  if (debug_info) {
+    const auto integrate_end = Clock::now();
+    debug_info->timings.solver_integrate_ms +=
+        elapsed_ms(integrate_begin, integrate_end);
+    debug_info->timings.solver_total_ms +=
+        elapsed_ms(solver_begin, integrate_end);
   }
 }
 

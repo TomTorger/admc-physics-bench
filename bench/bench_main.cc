@@ -29,6 +29,7 @@
 #include <iterator>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -51,10 +52,20 @@ struct BenchmarkResult {
   double joint_Linf = 0.0;
   bool simd = false;
   int threads = 1;
+  bool has_soa_timings = false;
+  SoaTimingBreakdown soa_timings;
+  std::string soa_debug_summary;
 };
 
 std::vector<BenchmarkResult> g_results;
 std::string g_results_csv_path = "results/results.csv";
+
+using Clock = std::chrono::steady_clock;
+using DurationMs = std::chrono::duration<double, std::milli>;
+
+double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
+  return DurationMs(end - begin).count();
+}
 
 struct MicrobenchResult {
   std::string kernel;
@@ -192,7 +203,37 @@ void print_run_summary(const BenchmarkResult& result) {
             << std::setprecision(3) << result.ms_per_step << std::defaultfloat
             << ", drift_max=" << result.drift_max << ", contacts="
             << result.contacts << "\n";
+  if (result.has_soa_timings) {
+    std::ostringstream timings;
+    timings << "    SoA timings (ms/step): contact=" << std::fixed
+            << std::setprecision(3) << result.soa_timings.contact_prep_ms
+            << ", row=" << result.soa_timings.row_build_ms
+            << ", joint_build=" << result.soa_timings.joint_distance_build_ms
+            << ", joint_pack=" << result.soa_timings.joint_pack_ms
+            << ", solver=" << result.soa_timings.solver_total_ms
+            << " [warm=" << result.soa_timings.solver_warmstart_ms
+            << ", iter=" << result.soa_timings.solver_iterations_ms
+            << ", integ=" << result.soa_timings.solver_integrate_ms
+            << "], scatter=" << result.soa_timings.scatter_ms
+            << ", total=" << result.soa_timings.total_step_ms;
+    std::cout << timings.str() << '\n';
+    if (!result.soa_debug_summary.empty()) {
+      std::cout << "    SoA debug: " << result.soa_debug_summary << '\n';
+    }
+  }
 }
+
+BenchmarkResult run_soa_result(const std::string& scene_name,
+                               const Scene& base_scene,
+                               const SoaParams& params,
+                               int steps,
+                               double ms_per_step_hint);
+
+BenchmarkResult run_soa_result(const std::string& scene_name,
+                               const Scene& base_scene,
+                               const SolverParams& params,
+                               int steps,
+                               double ms_per_step_hint);
 
 std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
                                                const std::string& scene_name,
@@ -254,18 +295,9 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     params.use_threads = (safe_threads > 1);
     params.thread_count = safe_threads;
     configure_solver_params(scene_name, params);
-    for (int step = 0; step < safe_steps; ++step) {
-      build_contact_offsets_and_bias(bodies, contacts, params);
-      RowSOA rows = build_soa(bodies, contacts, params);
-      build_distance_joint_rows(bodies, joints, params.dt);
-      JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
-      solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
-      scatter_joint_impulses(joint_rows, joints);
-    }
-    build_distance_joint_rows(bodies, joints, params.dt);
-    refresh_contacts_from_state(bodies, contacts);
-    simd_used = params.use_simd;
-    threads_used = params.use_threads ? params.thread_count : 1;
+    BenchmarkResult soa_result =
+        run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
+    return soa_result;
   } else {
     std::cerr << "Unknown solver: " << solver_name << "\n";
     return std::nullopt;
@@ -451,44 +483,6 @@ BenchmarkResult run_cached_result(const std::string& scene_name,
   BenchmarkResult result;
   result.scene = scene_name;
   result.solver = "scalar_cached";
-  result.iterations = params.iterations;
-  result.steps = steps;
-  result.dt = params.dt;
-  result.bodies = base_scene.bodies.size();
-  result.contacts = base_scene.contacts.size();
-  result.joints = base_scene.joints.size();
-  result.ms_per_step = ms_per_step;
-  result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
-  result.penetration_linf = constraint_penetration_Linf(contacts);
-  result.energy_drift = energy_drift(pre, bodies);
-  result.cone_consistency = cone_consistency(contacts);
-  result.joint_Linf = joint_error_Linf(joints);
-  result.simd = false;
-  result.threads = 1;
-  return result;
-}
-
-BenchmarkResult run_soa_result(const std::string& scene_name,
-                               const Scene& base_scene,
-                               const SolverParams& params,
-                               int steps,
-                               double ms_per_step) {
-  std::vector<RigidBody> bodies = base_scene.bodies;
-  std::vector<Contact> contacts = base_scene.contacts;
-  std::vector<DistanceJoint> joints = base_scene.joints;
-  const std::vector<RigidBody> pre = bodies;
-  for (int i = 0; i < steps; ++i) {
-    build_contact_offsets_and_bias(bodies, contacts, params);
-    RowSOA rows = build_soa(bodies, contacts, params);
-    build_distance_joint_rows(bodies, joints, params.dt);
-    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
-    solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
-    scatter_joint_impulses(joint_rows, joints);
-  }
-  build_distance_joint_rows(bodies, joints, params.dt);
-  BenchmarkResult result;
-  result.scene = scene_name;
-  result.solver = "scalar_soa";
   result.iterations = params.iterations;
   result.steps = steps;
   result.dt = params.dt;
@@ -1002,6 +996,111 @@ void BenchRopeSoA(benchmark::State& state) {
 
 #endif  // ADMC_HAVE_GBENCH
 
+BenchmarkResult run_soa_result(const std::string& scene_name,
+                               const Scene& base_scene,
+                               const SoaParams& params,
+                               int steps,
+                               double ms_per_step_hint) {
+  std::vector<RigidBody> bodies = base_scene.bodies;
+  std::vector<Contact> contacts = base_scene.contacts;
+  std::vector<DistanceJoint> joints = base_scene.joints;
+  const std::vector<RigidBody> pre = bodies;
+  SolverDebugInfo aggregate_debug;
+  SoaTimingBreakdown total_timings;
+  aggregate_debug.reset();
+  for (int i = 0; i < steps; ++i) {
+    SolverDebugInfo step_debug;
+    SoaTimingBreakdown step_timings;
+    const auto step_begin = Clock::now();
+
+    const auto contact_begin = Clock::now();
+    build_contact_offsets_and_bias(bodies, contacts, params);
+    const auto contact_end = Clock::now();
+    step_timings.contact_prep_ms += elapsed_ms(contact_begin, contact_end);
+
+    const auto row_begin = Clock::now();
+    RowSOA rows = build_soa(bodies, contacts, params);
+    const auto row_end = Clock::now();
+    step_timings.row_build_ms += elapsed_ms(row_begin, row_end);
+
+    const auto joint_distance_begin = Clock::now();
+    build_distance_joint_rows(bodies, joints, params.dt);
+    const auto joint_distance_end = Clock::now();
+    step_timings.joint_distance_build_ms +=
+        elapsed_ms(joint_distance_begin, joint_distance_end);
+
+    const auto joint_pack_begin = Clock::now();
+    JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+    const auto joint_pack_end = Clock::now();
+    step_timings.joint_pack_ms += elapsed_ms(joint_pack_begin, joint_pack_end);
+
+    const auto solver_begin = Clock::now();
+    solve_scalar_soa(bodies, contacts, rows, joint_rows, params, &step_debug);
+    const auto solver_end = Clock::now();
+    double solver_ms = step_debug.timings.solver_total_ms;
+    if (solver_ms <= 0.0) {
+      solver_ms = elapsed_ms(solver_begin, solver_end);
+    }
+    step_timings.solver_total_ms += solver_ms;
+    step_timings.solver_warmstart_ms += step_debug.timings.solver_warmstart_ms;
+    step_timings.solver_iterations_ms +=
+        step_debug.timings.solver_iterations_ms;
+    step_timings.solver_integrate_ms += step_debug.timings.solver_integrate_ms;
+
+    const auto scatter_begin = Clock::now();
+    scatter_joint_impulses(joint_rows, joints);
+    const auto scatter_end = Clock::now();
+    step_timings.scatter_ms += elapsed_ms(scatter_begin, scatter_end);
+
+    const auto step_end = Clock::now();
+    step_timings.total_step_ms += elapsed_ms(step_begin, step_end);
+
+    aggregate_debug.accumulate(step_debug);
+    total_timings.accumulate(step_timings);
+  }
+  build_distance_joint_rows(bodies, joints, params.dt);
+  BenchmarkResult result;
+  result.scene = scene_name;
+  result.solver = "scalar_soa";
+  result.iterations = params.iterations;
+  result.steps = steps;
+  result.dt = params.dt;
+  result.bodies = base_scene.bodies.size();
+  result.contacts = base_scene.contacts.size();
+  result.joints = base_scene.joints.size();
+  result.drift_max = directional_momentum_drift(pre, bodies).max_abs;
+  result.penetration_linf = constraint_penetration_Linf(contacts);
+  result.energy_drift = energy_drift(pre, bodies);
+  result.cone_consistency = cone_consistency(contacts);
+  result.joint_Linf = joint_error_Linf(joints);
+  result.simd = params.use_simd;
+  result.threads = params.use_threads ? std::max(1, params.thread_count) : 1;
+  const double derived_ms = (steps > 0)
+                                ? (total_timings.total_step_ms / static_cast<double>(steps))
+                                : 0.0;
+  result.ms_per_step = (ms_per_step_hint >= 0.0) ? ms_per_step_hint : derived_ms;
+  if (steps > 0) {
+    result.has_soa_timings = true;
+    result.soa_timings = total_timings;
+    result.soa_timings.scale(1.0 / steps);
+    SolverDebugInfo debug_avg = aggregate_debug;
+    debug_avg.timings = result.soa_timings;
+    result.soa_debug_summary = solver_debug_summary(debug_avg);
+  }
+  return result;
+}
+
+BenchmarkResult run_soa_result(const std::string& scene_name,
+                               const Scene& base_scene,
+                               const SolverParams& params,
+                               int steps,
+                               double ms_per_step_hint) {
+  SoaParams derived;
+  static_cast<SolverParams&>(derived) = params;
+  return run_soa_result(scene_name, base_scene, derived, steps, ms_per_step_hint);
+}
+
+
 void write_results_csv() {
   if (g_results.empty()) {
     return;
@@ -1030,7 +1129,13 @@ void write_results_csv() {
         << r.bodies << ',' << r.contacts << ',' << r.joints << ',' << r.ms_per_step
         << ',' << r.drift_max << ',' << r.penetration_linf << ',' << r.energy_drift
         << ',' << r.cone_consistency << ',' << (r.simd ? 1 : 0) << ',' << r.threads
-        << '\n';
+        << ',' << r.soa_timings.contact_prep_ms << ',' << r.soa_timings.row_build_ms
+        << ',' << r.soa_timings.joint_distance_build_ms << ','
+        << r.soa_timings.joint_pack_ms << ',' << r.soa_timings.solver_total_ms << ','
+        << r.soa_timings.solver_warmstart_ms << ','
+        << r.soa_timings.solver_iterations_ms << ','
+        << r.soa_timings.solver_integrate_ms << ',' << r.soa_timings.scatter_ms << ','
+        << r.soa_timings.total_step_ms << '\n';
   }
 }
 
@@ -1048,6 +1153,24 @@ void print_results_table() {
               << std::setw(14) << std::scientific << std::setprecision(3)
               << r.drift_max << std::setw(16) << r.energy_drift << std::setw(18)
               << r.cone_consistency << std::setw(14) << r.joint_Linf << '\n';
+    if (r.has_soa_timings) {
+      std::ostringstream timings;
+      timings << "    SoA timings (ms/step): contact=" << std::fixed
+              << std::setprecision(3) << r.soa_timings.contact_prep_ms
+              << ", row=" << r.soa_timings.row_build_ms
+              << ", joint_build=" << r.soa_timings.joint_distance_build_ms
+              << ", joint_pack=" << r.soa_timings.joint_pack_ms
+              << ", solver=" << r.soa_timings.solver_total_ms
+              << " [warm=" << r.soa_timings.solver_warmstart_ms
+              << ", iter=" << r.soa_timings.solver_iterations_ms
+              << ", integ=" << r.soa_timings.solver_integrate_ms
+              << "], scatter=" << r.soa_timings.scatter_ms
+              << ", total=" << r.soa_timings.total_step_ms;
+      std::cout << timings.str() << '\n';
+      if (!r.soa_debug_summary.empty()) {
+        std::cout << "    SoA debug: " << r.soa_debug_summary << '\n';
+      }
+    }
   }
   std::cout << std::defaultfloat;
 }
