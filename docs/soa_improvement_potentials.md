@@ -42,3 +42,25 @@ _All results gathered on the current default configuration (Release build) using
 ---
 
 _Add new measurements and findings below this line to maintain a chronological optimization record._
+
+### 2024-05-09 — Cached inertia products & friction gating
+
+**Implemented**
+
+- Cache the world-space inertia products (`TWi_*`) when contacts are built and reuse them during SoA row assembly to avoid six matrix-vector multiplies per contact.
+- Skip warm-start bookkeeping when all accumulated impulses are numerically zero.
+- Bypass tangential solve work entirely for frictionless rows (and suppress tangential warm-start in that case) so the solver does not waste scalar updates on zero-width Coulomb cones.
+
+**Benchmark snapshot (Release, `./build/bench/bench`)**
+
+| Scene | Steps | Iterations | ms/step | Contact build (ms) | Row build (ms) | Solver (ms) | Warm start (ms) | Iterations (ms) | Integration (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `spheres_cloud_1024` | 30 | 10 | 2.042 | 0.356 | 0.449 | 1.237 | 0.012 | 0.901 | 0.140 |
+
+Row construction is now ~6.6× faster than the previous 7.091 ms snapshot and contributes ~22% of the per-step cost (down from ~43%). Solver iterations also shed wasted tangential work, dropping from 5.255 ms to 0.901 ms per step while preserving determinism.
+
+**Next ideas**
+
+- Fold the tangential solve into a true SIMD batch so we amortize the remaining dot/cross math across contacts when friction is active.
+- Reuse `RowSOA` capacity across frames (e.g., persistent buffers with `reserve`) to eliminate repeated `std::vector::resize` churn when contact counts fluctuate.
+- Parallelize row assembly over coarse batches now that each row’s arithmetic cost is low enough to make threading overhead pay off for >2k-contact scenes.

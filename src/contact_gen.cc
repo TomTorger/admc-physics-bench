@@ -160,18 +160,24 @@ void build_impl(std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
     double k_n = A.invMass + B.invMass;
     k_n += math::dot(c.ra_cross_n, Iwa_n) + math::dot(c.rb_cross_n, Iwb_n);
     c.k_n = (k_n > math::kEps) ? k_n : 1.0;
+    c.TWn_a = Iwa_n;
+    c.TWn_b = Iwb_n;
 
     const math::Vec3 Iwa_t1 = A.invInertiaWorld * c.ra_cross_t1;
     const math::Vec3 Iwb_t1 = B.invInertiaWorld * c.rb_cross_t1;
     double k_t1 = A.invMass + B.invMass;
     k_t1 += math::dot(c.ra_cross_t1, Iwa_t1) + math::dot(c.rb_cross_t1, Iwb_t1);
     c.k_t1 = (k_t1 > math::kEps) ? k_t1 : 1.0;
+    c.TWt1_a = Iwa_t1;
+    c.TWt1_b = Iwb_t1;
 
     const math::Vec3 Iwa_t2 = A.invInertiaWorld * c.ra_cross_t2;
     const math::Vec3 Iwb_t2 = B.invInertiaWorld * c.rb_cross_t2;
     double k_t2 = A.invMass + B.invMass;
     k_t2 += math::dot(c.ra_cross_t2, Iwa_t2) + math::dot(c.rb_cross_t2, Iwb_t2);
     c.k_t2 = (k_t2 > math::kEps) ? k_t2 : 1.0;
+    c.TWt2_a = Iwa_t2;
+    c.TWt2_b = Iwb_t2;
   }
 }
 
