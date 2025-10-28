@@ -86,3 +86,70 @@ Row scatter now measures at ~0 ms per step and the row builder no longer spike
 - Fuse the normal/tangent angular dot products so tangential rows can reuse the work computed for the normal solve (or batch both into a small SIMD kernel).
 - Cache per-body angular velocities used by adjacent contacts within the iteration loop to lower repeated loads before pursuing wider SIMD.
 - Explore a coarse-grained row build job system (>2k contacts) to overlap contact prep and SoA packing when multiple threads are available.
+
+### 2024-05-11 — Local kinematics reuse & selective friction clamping
+
+**Implemented**
+
+- During warm-start disabling, zero only the active contact/joint slots so persistent capacity no longer incurs unnecessary memory traffic each frame.
+- Reuse the per-contact relative linear/angular velocities computed for the normal solve when evaluating friction, updating them in-place after the normal impulse so the tangential pass avoids redundant loads.
+- Defer the expensive square-root in the Coulomb projection until a clamp is actually required by comparing squared magnitudes first.
+
+**Benchmark snapshot (Release, `./build/bench/bench`)**
+
+| Scene | Steps | Iterations | ms/step | Contact build (ms) | Row build (ms) | Solver (ms) | Warm start (ms) | Iterations (ms) | Integration (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `spheres_cloud_1024` | 30 | 10 | 2.510 | 0.352 | 0.538 | 1.618 | 0.018 | 1.368 | 0.124 |
+
+Row construction eased slightly by skipping the blanket zeroing pass, but solver iterations still dominate (~54% of the frame). The in-place velocity reuse prevents extra cache traffic even though aggregate iteration time remains bounded by scalar math throughput.
+
+**Next ideas**
+
+- Stage per-body angular velocity caches outside the contact loop (e.g., scratch arrays of `w` per body) so multiple contacts referencing the same body do not reload and recompute dot products from global memory each iteration.
+- Batch the tangent updates for a contact pair into a small 2×2 solve so the Coulomb clamp uses shared intermediate terms instead of re-deriving them scalar-by-scalar.
+- Explore precomputing `invMassA + invMassB` and the normal/tangent `TW` dot products into compact arrays to shrink hot-loop arithmetic before attempting SIMD vectorization.
+
+### 2024-05-12 — AVX2 batched normal & friction solves
+
+**Implemented**
+
+- Replace the scalar contact iteration loop with an AVX2/NEON-aware batcher that processes four contacts per step, vectorizing the normal impulse solve and reusing the updated linear/angular kinematics for tangential friction.
+- Maintain per-lane bookkeeping to scatter impulses safely back into shared rigid bodies while keeping the SIMD math in tight lane buffers.
+- Retain the scalar joint solve and warm-start paths but zero invalid contacts/joints inside the vector loop to avoid stale impulses.
+
+**Benchmark snapshot (Release, `./build/bench/bench`)**
+
+| Scene | Steps | Iterations | ms/step | Contact build (ms) | Row build (ms) | Solver (ms) | Warm start (ms) | Iterations (ms) | Integration (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `spheres_cloud_1024` | 30 | 10 | 2.144 | 0.240 | 0.366 | 1.538 | 0.009 | 1.371 | 0.077 |
+
+The SIMD batches shave ~0.37 ms off the overall frame (≈15%), primarily by reducing per-contact arithmetic inside the solver to 1.54 ms while keeping warm-start costs minimal.
+
+**Next ideas**
+
+- Vectorize the impulse scatter/accumulate path (e.g., gather/scatter helpers or SoA velocity staging) so the SIMD math can update velocities without falling back to scalar loops per lane.
+- Revisit row construction with the same batching infrastructure to amortize the large dot-product chains that remain on the critical path.
+- Extend the SIMD kernel to operate on mixed joint/contact batches, paving the way for multi-threaded execution over pre-packed SIMD blocks.
+
+### 2024-05-13 — SIMD documentation & benchmark refresh
+
+**Documented**
+
+- Captured the AVX2/NEON SoA contact-loop refactor and clarified its impact on the solver journal for future reference.
+- Recorded a fresh benchmark run to track how the SIMD math behaves after integrating with the latest mainline changes.
+
+**Benchmark snapshot (Release, `./build/bench/bench --benchmark_filter=spheres_cloud_1024/soa`)**
+
+| Scene | Steps | Iterations | ms/step | Contact build (ms) | Row build (ms) | Solver (ms) | Warm start (ms) | Iterations (ms) | Integration (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `two_spheres` | 1 | 10 | 0.024 | 0.000 | 0.017 | 0.005 | 0.001 | 0.003 | 0.001 |
+| `spheres_cloud_1024` | 30 | 10 | 2.245 | 0.246 | 0.382 | 1.617 | 0.010 | 1.448 | 0.077 |
+| `box_stack_4` | 30 | 10 | 0.004 | 0.000 | 0.000 | 0.003 | 0.000 | 0.002 | 0.000 |
+
+The SIMD contact batches remain compute-bound on the solver iterations (≈64% of the frame on the cloud scene), while the row builder still consumes ~17%. The small-scene cases show the fixed overhead from packing/unpacking contacts is negligible relative to total time.
+
+**Next ideas**
+
+- Investigate vector-friendly scatter/accumulate paths so the SIMD contacts can update body velocities without per-lane scalar loops.
+- Re-measure with wider benchmark coverage (`spheres_cloud_4096`, joint-heavy scenes) once scatter becomes lane-friendly to ensure the SIMD pipeline scales.
+- Explore a follow-up documentation pass covering integration details for multi-threaded row assembly once the SIMD core stabilizes.
