@@ -150,8 +150,6 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
   rows.jt2.reserve(capacity);
   rows.indices.reserve(capacity);
 
-  const double beta_dt = (params.dt > math::kEps) ? (params.beta / params.dt) : 0.0;
-
   for (std::size_t i = 0; i < contacts.size(); ++i) {
     const Contact& c = contacts[i];
     if (c.a < 0 || c.b < 0 || c.a >= static_cast<int>(bodies.size()) ||
@@ -162,12 +160,16 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
     const RigidBody& A = bodies[c.a];
     const RigidBody& B = bodies[c.b];
 
-    Vec3 n = math::normalize_safe(c.n);
-    Vec3 t1 = orthonormalize(n, c.t1);
-    Vec3 t2 = math::cross(n, t1);
-    t2 = math::normalize_safe(t2);
-    if (math::length2(t2) <= math::kEps * math::kEps) {
+    Vec3 n = c.n;
+    Vec3 t1 = c.t1;
+    Vec3 t2 = c.t2;
+    if (math::length2(n) <= math::kEps * math::kEps) {
+      n = Vec3(1.0, 0.0, 0.0);
+    }
+    if (math::length2(t1) <= math::kEps * math::kEps) {
       t1 = make_tangent(n);
+    }
+    if (math::length2(t2) <= math::kEps * math::kEps) {
       t2 = math::normalize_safe(math::cross(n, t1));
     }
 
@@ -180,53 +182,32 @@ RowSOA build_soa(const std::vector<RigidBody>& bodies,
       rb = c.p - B.x;
     }
 
-    double violation = c.C;
-    if (std::fabs(violation) <= math::kEps) {
-      violation = 0.0;
-    }
-    // The scalar row formulation expects b = -beta/dt * C. We include a slop
-    // window here to match the documented stabilization strategy used in the
-    // solver configuration and avoid unnecessary correction of tiny errors.
-    const double bias = -beta_dt * std::max(0.0, -violation - params.slop);
-
-    const double restitution = std::max(c.e, params.restitution);
-    const double mu = std::max(c.mu, params.mu);
-
-    const Vec3 ra_cross_n = math::cross(ra, n);
-    const Vec3 rb_cross_n = math::cross(rb, n);
-    const Vec3 ra_cross_t1 = math::cross(ra, t1);
-    const Vec3 rb_cross_t1 = math::cross(rb, t1);
-    const Vec3 ra_cross_t2 = math::cross(ra, t2);
-    const Vec3 rb_cross_t2 = math::cross(rb, t2);
+    const Vec3 ra_cross_n = c.ra_cross_n;
+    const Vec3 rb_cross_n = c.rb_cross_n;
+    const Vec3 ra_cross_t1 = c.ra_cross_t1;
+    const Vec3 rb_cross_t1 = c.rb_cross_t1;
+    const Vec3 ra_cross_t2 = c.ra_cross_t2;
+    const Vec3 rb_cross_t2 = c.rb_cross_t2;
 
     const Vec3 TWn_a = A.invInertiaWorld * ra_cross_n;
     const Vec3 TWn_b = B.invInertiaWorld * rb_cross_n;
-    double k_n = A.invMass + B.invMass;
-    k_n += math::dot(ra_cross_n, TWn_a) + math::dot(rb_cross_n, TWn_b);
-    if (k_n <= math::kEps) {
-      k_n = 1.0;
-    }
-
     const Vec3 TWt1_a = A.invInertiaWorld * ra_cross_t1;
     const Vec3 TWt1_b = B.invInertiaWorld * rb_cross_t1;
-    double k_t1 = A.invMass + B.invMass;
-    k_t1 += math::dot(ra_cross_t1, TWt1_a) + math::dot(rb_cross_t1, TWt1_b);
-    if (k_t1 <= math::kEps) {
-      k_t1 = 1.0;
-    }
-
     const Vec3 TWt2_a = A.invInertiaWorld * ra_cross_t2;
     const Vec3 TWt2_b = B.invInertiaWorld * rb_cross_t2;
-    double k_t2 = A.invMass + B.invMass;
-    k_t2 += math::dot(ra_cross_t2, TWt2_a) + math::dot(rb_cross_t2, TWt2_b);
-    if (k_t2 <= math::kEps) {
-      k_t2 = 1.0;
-    }
+
+    const double k_n = (c.k_n > math::kEps) ? c.k_n : 1.0;
+    const double k_t1 = (c.k_t1 > math::kEps) ? c.k_t1 : 1.0;
+    const double k_t2 = (c.k_t2 > math::kEps) ? c.k_t2 : 1.0;
 
     const Vec3 va = A.v + math::cross(A.w, ra);
     const Vec3 vb = B.v + math::cross(B.w, rb);
     const double v_rel_n = math::dot(n, vb - va);
+    const double restitution = std::max(c.e, params.restitution);
     const double bounce = (v_rel_n < 0.0) ? (-restitution * v_rel_n) : 0.0;
+    const double bias = c.bias;
+    const double mu = std::max(c.mu, params.mu);
+    const double violation = (std::fabs(c.C) <= math::kEps) ? 0.0 : c.C;
 
     rows.indices.push_back(static_cast<int>(i));
     rows.a.push_back(c.a);
@@ -518,16 +499,31 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
       const double rbxt2_y = rows.rbxt2_y[i];
       const double rbxt2_z = rows.rbxt2_z[i];
 
-      const double wA_dot_raxt1 = wAx * raxt1_x + wAy * raxt1_y + wAz * raxt1_z;
-      const double wB_dot_rbxt1 = wBx * rbxt1_x + wBy * rbxt1_y + wBz * rbxt1_z;
-      const double wA_dot_raxt2 = wAx * raxt2_x + wAy * raxt2_y + wAz * raxt2_z;
-      const double wB_dot_rbxt2 = wBx * rbxt2_x + wBy * rbxt2_y + wBz * rbxt2_z;
+      const double dvx_post = B.v.x - A.v.x;
+      const double dvy_post = B.v.y - A.v.y;
+      const double dvz_post = B.v.z - A.v.z;
 
-      const double v_rel_t1 =
-          t1x * dvx + t1y * dvy + t1z * dvz + wB_dot_rbxt1 - wA_dot_raxt1;
+      const double wAx_post = A.w.x;
+      const double wAy_post = A.w.y;
+      const double wAz_post = A.w.z;
+      const double wBx_post = B.w.x;
+      const double wBy_post = B.w.y;
+      const double wBz_post = B.w.z;
 
-      const double v_rel_t2 =
-          t2x * dvx + t2y * dvy + t2z * dvz + wB_dot_rbxt2 - wA_dot_raxt2;
+      const double wA_dot_raxt1 =
+          wAx_post * raxt1_x + wAy_post * raxt1_y + wAz_post * raxt1_z;
+      const double wB_dot_rbxt1 =
+          wBx_post * rbxt1_x + wBy_post * rbxt1_y + wBz_post * rbxt1_z;
+      const double wA_dot_raxt2 =
+          wAx_post * raxt2_x + wAy_post * raxt2_y + wAz_post * raxt2_z;
+      const double wB_dot_rbxt2 =
+          wBx_post * rbxt2_x + wBy_post * rbxt2_y + wBz_post * rbxt2_z;
+
+      const double v_rel_t1 = t1x * dvx_post + t1y * dvy_post + t1z * dvz_post +
+                              wB_dot_rbxt1 - wA_dot_raxt1;
+
+      const double v_rel_t2 = t2x * dvx_post + t2y * dvy_post + t2z * dvz_post +
+                              wB_dot_rbxt2 - wA_dot_raxt2;
 
       double jt1_candidate =
           rows.jt1[i] + (-v_rel_t1) * rows.inv_k_t1[i];
