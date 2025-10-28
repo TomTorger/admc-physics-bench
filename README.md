@@ -69,6 +69,8 @@ types.hpp            # RigidBody, Contact, RowSOA (and friends)
   - Scalar friction rows: `docs/alg_scalar_friction_rows_math.md`
   - Distance/rope joints (scalar row + compliance): `docs/alg_scalar_distance_joint_math.md`
   - SoA-batched scalar rows: `docs/alg_scalar_soa_batched_math.md`
+- **Optimization opportunities log** — persistent record of SoA solver improvement targets:
+  `docs/soa_improvement_potentials.md`. Keep this file as the static location for documenting timing insights and optimization ideas so the history stays centralized.
 
 ---
 
