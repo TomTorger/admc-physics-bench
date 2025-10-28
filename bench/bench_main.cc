@@ -222,6 +222,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   const std::vector<RigidBody> pre = bodies;
 
   const auto start = std::chrono::steady_clock::now();
+  bool simd_used = false;
+  int threads_used = 1;
 
   if (normalized == "baseline") {
     BaselineParams params;
@@ -246,16 +248,24 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     build_distance_joint_rows(bodies, joints, params.dt);
     refresh_contacts_from_state(bodies, contacts);
   } else if (normalized == "soa") {
-    SolverParams params;
+    SoaParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
+    params.use_threads = (safe_threads > 1);
+    params.thread_count = safe_threads;
     configure_solver_params(scene_name, params);
     for (int step = 0; step < safe_steps; ++step) {
       build_contact_offsets_and_bias(bodies, contacts, params);
       RowSOA rows = build_soa(bodies, contacts, params);
-      solve_scalar_soa(bodies, contacts, rows, params);
+      build_distance_joint_rows(bodies, joints, params.dt);
+      JointSOA joint_rows = build_joint_soa(bodies, joints, params.dt);
+      solve_scalar_soa(bodies, contacts, rows, joint_rows, params);
+      scatter_joint_impulses(joint_rows, joints);
     }
+    build_distance_joint_rows(bodies, joints, params.dt);
     refresh_contacts_from_state(bodies, contacts);
+    simd_used = params.use_simd;
+    threads_used = params.use_threads ? params.thread_count : 1;
   } else {
     std::cerr << "Unknown solver: " << solver_name << "\n";
     return std::nullopt;
@@ -283,8 +293,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   result.energy_drift = energy_drift(pre, bodies);
   result.cone_consistency = cone_consistency(contacts);
   result.joint_Linf = joint_error_Linf(joints);
-  result.simd = (normalized == "soa");
-  result.threads = (normalized == "soa") ? safe_threads : 1;
+  result.simd = simd_used;
+  result.threads = threads_used;
   return result;
 }
 
