@@ -5,6 +5,8 @@
 #include "types.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <vector>
@@ -64,6 +66,149 @@ struct BodySoA {
       bodies[i].w.y = wy[i];
       bodies[i].w.z = wz[i];
     }
+  }
+};
+
+struct BodyTile {
+  static constexpr int kMaxBodies = soa::kLane * 2;
+
+  std::array<int, kMaxBodies> ids{};
+  std::array<double, kMaxBodies> dvx{};
+  std::array<double, kMaxBodies> dvy{};
+  std::array<double, kMaxBodies> dvz{};
+  std::array<double, kMaxBodies> dwx{};
+  std::array<double, kMaxBodies> dwy{};
+  std::array<double, kMaxBodies> dwz{};
+  int count = 0;
+
+  void reset() {
+    count = 0;
+    ids.fill(-1);
+    dvx.fill(0.0);
+    dvy.fill(0.0);
+    dvz.fill(0.0);
+    dwx.fill(0.0);
+    dwy.fill(0.0);
+    dwz.fill(0.0);
+  }
+
+  int find_slot(int body) const {
+    for (int i = 0; i < count; ++i) {
+      if (ids[static_cast<std::size_t>(i)] == body) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  int ensure_slot(int body) {
+    const int existing = find_slot(body);
+    if (existing >= 0) {
+      return existing;
+    }
+    assert(count < kMaxBodies && "BodyTile overflow");
+    if (count >= kMaxBodies) {
+      return -1;
+    }
+    ids[static_cast<std::size_t>(count)] = body;
+    dvx[static_cast<std::size_t>(count)] = 0.0;
+    dvy[static_cast<std::size_t>(count)] = 0.0;
+    dvz[static_cast<std::size_t>(count)] = 0.0;
+    dwx[static_cast<std::size_t>(count)] = 0.0;
+    dwy[static_cast<std::size_t>(count)] = 0.0;
+    dwz[static_cast<std::size_t>(count)] = 0.0;
+    ++count;
+    return count - 1;
+  }
+
+  void accumulate(int body,
+                  double add_vx,
+                  double add_vy,
+                  double add_vz,
+                  double add_wx,
+                  double add_wy,
+                  double add_wz) {
+    const int slot = ensure_slot(body);
+    if (slot < 0) {
+      return;
+    }
+    dvx[static_cast<std::size_t>(slot)] += add_vx;
+    dvy[static_cast<std::size_t>(slot)] += add_vy;
+    dvz[static_cast<std::size_t>(slot)] += add_vz;
+    dwx[static_cast<std::size_t>(slot)] += add_wx;
+    dwy[static_cast<std::size_t>(slot)] += add_wy;
+    dwz[static_cast<std::size_t>(slot)] += add_wz;
+  }
+
+  double delta_linear_x(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dvx[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double delta_linear_y(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dvy[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double delta_linear_z(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dvz[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double delta_angular_x(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dwx[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double delta_angular_y(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dwy[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double delta_angular_z(int body) const {
+    const int slot = find_slot(body);
+    return (slot >= 0) ? dwz[static_cast<std::size_t>(slot)] : 0.0;
+  }
+
+  double linear_x(const BodySoA& state, int body) const {
+    return state.vx[static_cast<std::size_t>(body)] + delta_linear_x(body);
+  }
+
+  double linear_y(const BodySoA& state, int body) const {
+    return state.vy[static_cast<std::size_t>(body)] + delta_linear_y(body);
+  }
+
+  double linear_z(const BodySoA& state, int body) const {
+    return state.vz[static_cast<std::size_t>(body)] + delta_linear_z(body);
+  }
+
+  double angular_x(const BodySoA& state, int body) const {
+    return state.wx[static_cast<std::size_t>(body)] + delta_angular_x(body);
+  }
+
+  double angular_y(const BodySoA& state, int body) const {
+    return state.wy[static_cast<std::size_t>(body)] + delta_angular_y(body);
+  }
+
+  double angular_z(const BodySoA& state, int body) const {
+    return state.wz[static_cast<std::size_t>(body)] + delta_angular_z(body);
+  }
+
+  void flush(BodySoA& state) {
+    for (int i = 0; i < count; ++i) {
+      const int body = ids[static_cast<std::size_t>(i)];
+      if (body < 0) {
+        continue;
+      }
+      const std::size_t idx = static_cast<std::size_t>(body);
+      state.vx[idx] += dvx[static_cast<std::size_t>(i)];
+      state.vy[idx] += dvy[static_cast<std::size_t>(i)];
+      state.vz[idx] += dvz[static_cast<std::size_t>(i)];
+      state.wx[idx] += dwx[static_cast<std::size_t>(i)];
+      state.wy[idx] += dwy[static_cast<std::size_t>(i)];
+      state.wz[idx] += dwz[static_cast<std::size_t>(i)];
+    }
+    reset();
   }
 };
 
@@ -732,14 +877,29 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       jn_candidate_v.store(batch.jn_pre_clamp);
       jn_clamped_v.store(batch.jn_new);
 
+      BodyTile normal_tile;
+      normal_tile.reset();
+
       for (int lane = 0; lane < lanes; ++lane) {
         const int idx = batch.start + lane;
         if (!batch.lane_valid[lane]) {
           rows.jn[idx] = 0.0;
           rows.jt1[idx] = 0.0;
           rows.jt2[idx] = 0.0;
+          batch.dvx[lane] = 0.0;
+          batch.dvy[lane] = 0.0;
+          batch.dvz[lane] = 0.0;
+          batch.wAx[lane] = 0.0;
+          batch.wAy[lane] = 0.0;
+          batch.wAz[lane] = 0.0;
+          batch.wBx[lane] = 0.0;
+          batch.wBy[lane] = 0.0;
+          batch.wBz[lane] = 0.0;
           continue;
         }
+
+        const int ia = batch.bodyA_index[lane];
+        const int ib = batch.bodyB_index[lane];
 
         const double jn_pre = batch.jn_pre_clamp[lane];
         double jn_new = batch.jn_new[lane];
@@ -758,45 +918,42 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_x = applied * batch.nx[lane];
           const double impulse_y = applied * batch.ny[lane];
           const double impulse_z = applied * batch.nz[lane];
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
+          const double inv_mass_a = batch.invMassA[lane];
+          const double inv_mass_b = batch.invMassB[lane];
 
-          body_state.wx[ia] -= applied * batch.TWn_a_x[lane];
-          body_state.wy[ia] -= applied * batch.TWn_a_y[lane];
-          body_state.wz[ia] -= applied * batch.TWn_a_z[lane];
-          body_state.wx[ib] += applied * batch.TWn_b_x[lane];
-          body_state.wy[ib] += applied * batch.TWn_b_y[lane];
-          body_state.wz[ib] += applied * batch.TWn_b_z[lane];
-
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
-        } else {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+          normal_tile.accumulate(ia, -impulse_x * inv_mass_a,
+                                 -impulse_y * inv_mass_a,
+                                 -impulse_z * inv_mass_a,
+                                 -applied * batch.TWn_a_x[lane],
+                                 -applied * batch.TWn_a_y[lane],
+                                 -applied * batch.TWn_a_z[lane]);
+          normal_tile.accumulate(ib, impulse_x * inv_mass_b,
+                                 impulse_y * inv_mass_b,
+                                 impulse_z * inv_mass_b,
+                                 applied * batch.TWn_b_x[lane],
+                                 applied * batch.TWn_b_y[lane],
+                                 applied * batch.TWn_b_z[lane]);
         }
+
+        const double vx_a = normal_tile.linear_x(body_state, ia);
+        const double vy_a = normal_tile.linear_y(body_state, ia);
+        const double vz_a = normal_tile.linear_z(body_state, ia);
+        const double vx_b = normal_tile.linear_x(body_state, ib);
+        const double vy_b = normal_tile.linear_y(body_state, ib);
+        const double vz_b = normal_tile.linear_z(body_state, ib);
+
+        batch.dvx[lane] = vx_b - vx_a;
+        batch.dvy[lane] = vy_b - vy_a;
+        batch.dvz[lane] = vz_b - vz_a;
+        batch.wAx[lane] = normal_tile.angular_x(body_state, ia);
+        batch.wAy[lane] = normal_tile.angular_y(body_state, ia);
+        batch.wAz[lane] = normal_tile.angular_z(body_state, ia);
+        batch.wBx[lane] = normal_tile.angular_x(body_state, ib);
+        batch.wBy[lane] = normal_tile.angular_y(body_state, ib);
+        batch.wBz[lane] = normal_tile.angular_z(body_state, ib);
       }
+
+      normal_tile.flush(body_state);
 
       dvx_v = VecD::load(batch.dvx);
       dvy_v = VecD::load(batch.dvy);
@@ -851,6 +1008,9 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       v_rel_t1_v.store(batch.v_rel_t1);
       v_rel_t2_v.store(batch.v_rel_t2);
 
+      BodyTile friction_tile;
+      friction_tile.reset();
+
       for (int lane = 0; lane < lanes; ++lane) {
         const int idx = batch.start + lane;
         if (!batch.lane_valid[lane]) {
@@ -858,20 +1018,48 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           rows.jt2[idx] = 0.0;
           batch.jt1[lane] = 0.0;
           batch.jt2[lane] = 0.0;
+          batch.dvx[lane] = 0.0;
+          batch.dvy[lane] = 0.0;
+          batch.dvz[lane] = 0.0;
+          batch.wAx[lane] = 0.0;
+          batch.wAy[lane] = 0.0;
+          batch.wAz[lane] = 0.0;
+          batch.wBx[lane] = 0.0;
+          batch.wBy[lane] = 0.0;
+          batch.wBz[lane] = 0.0;
           continue;
         }
 
+        const int ia = batch.bodyA_index[lane];
+        const int ib = batch.bodyB_index[lane];
         const double mu = batch.mu[lane];
         if (mu <= math::kEps) {
           rows.jt1[idx] = 0.0;
           rows.jt2[idx] = 0.0;
           batch.jt1[lane] = 0.0;
           batch.jt2[lane] = 0.0;
+
+          const double vx_a = friction_tile.linear_x(body_state, ia);
+          const double vy_a = friction_tile.linear_y(body_state, ia);
+          const double vz_a = friction_tile.linear_z(body_state, ia);
+          const double vx_b = friction_tile.linear_x(body_state, ib);
+          const double vy_b = friction_tile.linear_y(body_state, ib);
+          const double vz_b = friction_tile.linear_z(body_state, ib);
+          batch.dvx[lane] = vx_b - vx_a;
+          batch.dvy[lane] = vy_b - vy_a;
+          batch.dvz[lane] = vz_b - vz_a;
+          batch.wAx[lane] = friction_tile.angular_x(body_state, ia);
+          batch.wAy[lane] = friction_tile.angular_y(body_state, ia);
+          batch.wAz[lane] = friction_tile.angular_z(body_state, ia);
+          batch.wBx[lane] = friction_tile.angular_x(body_state, ib);
+          batch.wBy[lane] = friction_tile.angular_y(body_state, ib);
+          batch.wBz[lane] = friction_tile.angular_z(body_state, ib);
           continue;
         }
 
-        const double vt_mag = std::sqrt(batch.v_rel_t1[lane] * batch.v_rel_t1[lane] +
-                                        batch.v_rel_t2[lane] * batch.v_rel_t2[lane]);
+        const double vt_mag =
+            std::sqrt(batch.v_rel_t1[lane] * batch.v_rel_t1[lane] +
+                      batch.v_rel_t2[lane] * batch.v_rel_t2[lane]);
         const double jt1_old = batch.jt1[lane];
         const double jt2_old = batch.jt2[lane];
         double jt1_candidate =
@@ -879,8 +1067,7 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         double jt2_candidate =
             jt2_old + (-batch.v_rel_t2[lane]) * batch.inv_k_t2[lane];
 
-        double friction_max =
-            mu * std::max(batch.jn_new[lane], 0.0);
+        double friction_max = mu * std::max(batch.jn_new[lane], 0.0);
         const double jt_mag_sq =
             jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
         double friction_max_sq = friction_max * friction_max;
@@ -892,35 +1079,22 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
             const double required_jn = jt_mag / mu;
             const double delta_needed = required_jn - batch.jn_new[lane];
             if (delta_needed > math::kEps) {
-              const int ia = batch.bodyA_index[lane];
-              const int ib = batch.bodyB_index[lane];
               const double impulse_x = delta_needed * batch.nx[lane];
               const double impulse_y = delta_needed * batch.ny[lane];
               const double impulse_z = delta_needed * batch.nz[lane];
 
-              body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-              body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-              body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-              body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-              body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-              body_state.vz[ib] += impulse_z * batch.invMassB[lane];
-
-              body_state.wx[ia] -= delta_needed * batch.TWn_a_x[lane];
-              body_state.wy[ia] -= delta_needed * batch.TWn_a_y[lane];
-              body_state.wz[ia] -= delta_needed * batch.TWn_a_z[lane];
-              body_state.wx[ib] += delta_needed * batch.TWn_b_x[lane];
-              body_state.wy[ib] += delta_needed * batch.TWn_b_y[lane];
-              body_state.wz[ib] += delta_needed * batch.TWn_b_z[lane];
-
-              batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-              batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-              batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-              batch.wAx[lane] = body_state.wx[ia];
-              batch.wAy[lane] = body_state.wy[ia];
-              batch.wAz[lane] = body_state.wz[ia];
-              batch.wBx[lane] = body_state.wx[ib];
-              batch.wBy[lane] = body_state.wy[ib];
-              batch.wBz[lane] = body_state.wz[ib];
+              friction_tile.accumulate(ia, -impulse_x * batch.invMassA[lane],
+                                       -impulse_y * batch.invMassA[lane],
+                                       -impulse_z * batch.invMassA[lane],
+                                       -delta_needed * batch.TWn_a_x[lane],
+                                       -delta_needed * batch.TWn_a_y[lane],
+                                       -delta_needed * batch.TWn_a_z[lane]);
+              friction_tile.accumulate(ib, impulse_x * batch.invMassB[lane],
+                                       impulse_y * batch.invMassB[lane],
+                                       impulse_z * batch.invMassB[lane],
+                                       delta_needed * batch.TWn_b_x[lane],
+                                       delta_needed * batch.TWn_b_y[lane],
+                                       delta_needed * batch.TWn_b_z[lane]);
 
               batch.jn_new[lane] = required_jn;
               batch.jn[lane] = required_jn;
@@ -950,9 +1124,6 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
         if (std::fabs(delta_jt1) > math::kEps ||
             std::fabs(delta_jt2) > math::kEps) {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-
           const double impulse_x = delta_jt1 * batch.t1x[lane] +
                                    delta_jt2 * batch.t2x[lane];
           const double impulse_y = delta_jt1 * batch.t1y[lane] +
@@ -960,37 +1131,48 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_z = delta_jt1 * batch.t1z[lane] +
                                    delta_jt2 * batch.t2z[lane];
 
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
-
-          body_state.wx[ia] -= delta_jt1 * batch.TWt1_a_x[lane] +
+          const double dw_ax = delta_jt1 * batch.TWt1_a_x[lane] +
                                delta_jt2 * batch.TWt2_a_x[lane];
-          body_state.wy[ia] -= delta_jt1 * batch.TWt1_a_y[lane] +
+          const double dw_ay = delta_jt1 * batch.TWt1_a_y[lane] +
                                delta_jt2 * batch.TWt2_a_y[lane];
-          body_state.wz[ia] -= delta_jt1 * batch.TWt1_a_z[lane] +
+          const double dw_az = delta_jt1 * batch.TWt1_a_z[lane] +
                                delta_jt2 * batch.TWt2_a_z[lane];
-          body_state.wx[ib] += delta_jt1 * batch.TWt1_b_x[lane] +
+          const double dw_bx = delta_jt1 * batch.TWt1_b_x[lane] +
                                delta_jt2 * batch.TWt2_b_x[lane];
-          body_state.wy[ib] += delta_jt1 * batch.TWt1_b_y[lane] +
+          const double dw_by = delta_jt1 * batch.TWt1_b_y[lane] +
                                delta_jt2 * batch.TWt2_b_y[lane];
-          body_state.wz[ib] += delta_jt1 * batch.TWt1_b_z[lane] +
+          const double dw_bz = delta_jt1 * batch.TWt1_b_z[lane] +
                                delta_jt2 * batch.TWt2_b_z[lane];
 
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+          friction_tile.accumulate(ia, -impulse_x * batch.invMassA[lane],
+                                   -impulse_y * batch.invMassA[lane],
+                                   -impulse_z * batch.invMassA[lane], -dw_ax,
+                                   -dw_ay, -dw_az);
+          friction_tile.accumulate(ib, impulse_x * batch.invMassB[lane],
+                                   impulse_y * batch.invMassB[lane],
+                                   impulse_z * batch.invMassB[lane], dw_bx,
+                                   dw_by, dw_bz);
         }
+
+        const double vx_a = friction_tile.linear_x(body_state, ia);
+        const double vy_a = friction_tile.linear_y(body_state, ia);
+        const double vz_a = friction_tile.linear_z(body_state, ia);
+        const double vx_b = friction_tile.linear_x(body_state, ib);
+        const double vy_b = friction_tile.linear_y(body_state, ib);
+        const double vz_b = friction_tile.linear_z(body_state, ib);
+
+        batch.dvx[lane] = vx_b - vx_a;
+        batch.dvy[lane] = vy_b - vy_a;
+        batch.dvz[lane] = vz_b - vz_a;
+        batch.wAx[lane] = friction_tile.angular_x(body_state, ia);
+        batch.wAy[lane] = friction_tile.angular_y(body_state, ia);
+        batch.wAz[lane] = friction_tile.angular_z(body_state, ia);
+        batch.wBx[lane] = friction_tile.angular_x(body_state, ib);
+        batch.wBy[lane] = friction_tile.angular_y(body_state, ib);
+        batch.wBz[lane] = friction_tile.angular_z(body_state, ib);
       }
+
+      friction_tile.flush(body_state);
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
