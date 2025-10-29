@@ -1,15 +1,28 @@
 name: CI
+
 on: [push, pull_request]
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup
+
+      - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build build --config Release -j 2
-      - name: Tests
-        run: ctest --test-dir build --output-on-failure
+
+      - name: Run build, tests, and quick bench
+        run: bash scripts/ci_check.sh
+
+      - name: Upload quick bench CSV
+        if: success() && hashFiles('results/ci_quick.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-quick-bench
+          path: results/ci_quick.csv
+          if-no-files-found: ignore
+
+      - name: Publish performance summary
+        if: success() && hashFiles('results/ci_quick.csv') != ''
+        run: |
+          python3 scripts/ci_summary.py results/ci_quick.csv | tee -a "$GITHUB_STEP_SUMMARY"
