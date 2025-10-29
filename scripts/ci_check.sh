@@ -24,10 +24,8 @@ if [[ ! -x "${BENCH}" ]]; then
   exit 0
 fi
 
-# Ensure CSV header if file is new/empty
-if [[ ! -s "${CSV}" ]]; then
-  echo "scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,simd,threads" > "${CSV}"
-fi
+# Start each CI run with a clean CSV so the bench binary can write its own schema
+rm -f "${CSV}"
 
 run_case () {
   local scene="$1" solver="$2" iters="${3:-10}" steps="${4:-30}"
