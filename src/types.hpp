@@ -4,6 +4,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <algorithm>
 
 using math::Mat3;
 using math::Quat;
@@ -76,6 +77,44 @@ struct Contact {
   double plane_offset = 0.0; //!< Optional plane offset when involving a plane.
   Type type = Type::kUnknown;
 };
+
+struct RowSOA;
+struct JointSOA;
+
+//! Dual structure-of-arrays body storage used by SIMD solvers.
+struct SolverBodySoA {
+  std::vector<int> body_of_slot;   //!< Mapping from SoA slot to body index.
+  std::vector<int> slot_of_body;   //!< Mapping from body index to SoA slot.
+
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+  std::vector<double> wx;
+  std::vector<double> wy;
+  std::vector<double> wz;
+
+  //! Resets the storage to cover the bodies referenced by contacts / joints.
+  void initialize(const std::vector<RigidBody>& bodies,
+                  const RowSOA& rows,
+                  const JointSOA& joints);
+
+  //! Copies AoS velocities into the SoA buffers for active bodies.
+  void load_from(const std::vector<RigidBody>& bodies);
+
+  //! Flushes SoA velocities back to the underlying AoS body storage.
+  void store_to(std::vector<RigidBody>& bodies) const;
+
+  //! Returns the SoA slot for a body index or -1 if the body is inactive.
+  int slot_for_body(int body_index) const {
+    if (body_index < 0 || static_cast<std::size_t>(body_index) >= slot_of_body.size()) {
+      return -1;
+    }
+    return slot_of_body[static_cast<std::size_t>(body_index)];
+  }
+
+  std::size_t size() const { return body_of_slot.size(); }
+};
+
 
 //! Structure-of-arrays representation of contacts for batched solves.
 struct RowSOA {
