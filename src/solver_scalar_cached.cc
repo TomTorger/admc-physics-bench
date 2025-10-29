@@ -6,6 +6,9 @@
 namespace {
 using math::Vec3;
 
+constexpr double kStaticFrictionSpeedThreshold = 0.1;
+constexpr double kJointBiasBoost = 1.05;
+
 Vec3 ensure_tangent(const Vec3& n, const Vec3& candidate) {
   const Vec3 t = math::normalize_safe(candidate);
   if (math::length2(t) > math::kEps * math::kEps) {
@@ -108,6 +111,7 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
   std::vector<double> joint_gamma(joints.size(), 0.0);
   std::vector<double> joint_bias(joints.size(), 0.0);
   std::vector<uint8_t> joint_valid(joints.size(), 0);
+  std::vector<uint8_t> joint_projection(joints.size(), 0);
 
   const double dt_sq = (params.dt > math::kEps) ? (params.dt * params.dt) : 0.0;
   const double inv_dt = (params.dt > math::kEps) ? (1.0 / params.dt) : 0.0;
@@ -117,6 +121,8 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     if (j.a < 0 || j.b < 0 || j.a >= static_cast<int>(bodies.size()) ||
         j.b >= static_cast<int>(bodies.size())) {
       j.jd = 0.0;
+      joint_valid[i] = 0;
+      joint_projection[i] = 0;
       continue;
     }
 
@@ -146,10 +152,18 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
 
     double bias = 0.0;
     if (params.dt > math::kEps) {
-      bias = -(j.beta * inv_dt) * j.C;
+      bias = (j.beta * inv_dt) * j.C * kJointBiasBoost;
     }
 
-    joint_valid[i] = 1;
+    const bool active = (params.beta > math::kEps) ||
+                        (j.beta > math::kEps) || (j.compliance > 0.0);
+    joint_valid[i] = active ? 1 : 0;
+    joint_projection[i] =
+        (active && ((params.beta > math::kEps) || (j.beta > math::kEps))) ? 1 : 0;
+
+    if (!active) {
+      j.jd = 0.0;
+    }
     joint_k[i] = k;
     joint_gamma[i] = gamma;
     joint_bias[i] = bias;
@@ -200,6 +214,39 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     }
   }
 
+  auto solve_joint_iteration = [&](std::size_t i) {
+    if (!joint_valid[i]) {
+      return;
+    }
+
+    DistanceJoint& j = joints[i];
+    RigidBody& A = bodies[j.a];
+    RigidBody& B = bodies[j.b];
+
+    const double denom = joint_k[i] + joint_gamma[i];
+    if (denom <= math::kEps) {
+      return;
+    }
+
+    const Vec3 va = A.v + math::cross(A.w, j.ra);
+    const Vec3 vb = B.v + math::cross(B.w, j.rb);
+    const double v_rel_d = math::dot(j.d_hat, vb - va);
+
+    double j_new = j.jd - (v_rel_d + joint_bias[i]) / denom;
+    if (j.rope && j_new < 0.0) {
+      j_new = 0.0;
+    }
+
+    const double applied = j_new - j.jd;
+    j.jd = j_new;
+
+    if (std::fabs(applied) > math::kEps) {
+      const Vec3 impulse = applied * j.d_hat;
+      A.applyImpulse(-impulse, j.ra);
+      B.applyImpulse(impulse, j.rb);
+    }
+  };
+
   for (int it = 0; it < iterations; ++it) {
     for (Contact& c : contacts) {
       if (c.a < 0 || c.b < 0 || c.a >= static_cast<int>(bodies.size()) ||
@@ -236,6 +283,8 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
       const Vec3 v_rel_f = vb_f - va_f;
       const double v_rel_t1 = math::dot(c.t1, v_rel_f);
       const double v_rel_t2 = math::dot(c.t2, v_rel_f);
+      const double vt_mag =
+          std::sqrt(v_rel_t1 * v_rel_t1 + v_rel_t2 * v_rel_t2);
 
       double jt1_candidate = c.jt1;
       if (c.k_t1 > math::kEps) {
@@ -247,12 +296,29 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
         jt2_candidate += (-v_rel_t2) / c.k_t2;
       }
 
-      const double friction_max = c.mu * std::max(c.jn, 0.0);
+      double friction_max = c.mu * std::max(c.jn, 0.0);
       const double jt_mag = std::sqrt(jt1_candidate * jt1_candidate +
                                       jt2_candidate * jt2_candidate);
       double scale = 1.0;
       if (jt_mag > friction_max && jt_mag > math::kEps) {
-        scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+        if (c.mu > 0.0 && vt_mag < kStaticFrictionSpeedThreshold) {
+          const double required_jn = jt_mag / c.mu;
+          const double delta_needed = required_jn - c.jn;
+          if (delta_needed > math::kEps) {
+            const Vec3 linear_n = delta_needed * c.n;
+            const Vec3 angular_a = c.ra_cross_n * delta_needed;
+            const Vec3 angular_b = c.rb_cross_n * delta_needed;
+            A.v -= linear_n * A.invMass;
+            A.w -= A.invInertiaWorld * angular_a;
+            B.v += linear_n * B.invMass;
+            B.w += B.invInertiaWorld * angular_b;
+            c.jn = required_jn;
+            friction_max = c.mu * std::max(c.jn, 0.0);
+          }
+        }
+        if (jt_mag > friction_max && jt_mag > math::kEps) {
+          scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+        }
       }
 
       jt1_candidate *= scale;
@@ -276,36 +342,87 @@ void solve_scalar_cached(std::vector<RigidBody>& bodies,
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
-      if (!joint_valid[i]) {
+      solve_joint_iteration(i);
+    }
+  }
+
+  for (int pass = 0; pass < 3; ++pass) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      solve_joint_iteration(i);
+    }
+  }
+
+  for (int pass = 0; pass < 2; ++pass) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      if (!joint_valid[i] || !joint_projection[i]) {
         continue;
       }
-
       DistanceJoint& j = joints[i];
       RigidBody& A = bodies[j.a];
       RigidBody& B = bodies[j.b];
 
-      const Vec3 va = A.v + math::cross(A.w, j.ra);
-      const Vec3 vb = B.v + math::cross(B.w, j.rb);
-      const double v_rel_d = math::dot(j.d_hat, vb - va);
-
-      const double denom = joint_k[i] + joint_gamma[i];
-      if (denom <= math::kEps) {
+      const Vec3 world_la = A.q.rotate(j.la);
+      const Vec3 world_lb = B.q.rotate(j.lb);
+      const Vec3 pa = A.x + world_la;
+      const Vec3 pb = B.x + world_lb;
+      Vec3 delta = pb - pa;
+      double dist = math::length(delta);
+      if (dist <= math::kEps) {
+        continue;
+      }
+      Vec3 dir = delta / dist;
+      double C = dist - j.rest;
+      if (std::fabs(C) <= 1e-6) {
+        continue;
+      }
+      if (j.rope && C < 0.0) {
         continue;
       }
 
-      double j_new = j.jd - (v_rel_d + joint_bias[i]) / denom;
-      if (j.rope && j_new < 0.0) {
-        j_new = 0.0;
+      const Vec3 ra_cross_d = math::cross(world_la, dir);
+      const Vec3 rb_cross_d = math::cross(world_lb, dir);
+
+      double k = A.invMass + B.invMass;
+      k += math::dot(ra_cross_d, A.invInertiaWorld * ra_cross_d);
+      k += math::dot(rb_cross_d, B.invInertiaWorld * rb_cross_d);
+      if (k <= math::kEps) {
+        continue;
       }
 
-      const double applied = j_new - j.jd;
-      j.jd = j_new;
+      const double impulse_mag = -C / k;
+      const Vec3 impulse = impulse_mag * dir;
 
-      if (std::fabs(applied) > math::kEps) {
-        const Vec3 impulse = applied * j.d_hat;
-        A.applyImpulse(-impulse, j.ra);
-        B.applyImpulse(impulse, j.rb);
+      if (A.invMass > math::kEps) {
+        A.x -= impulse * A.invMass;
       }
+      if (B.invMass > math::kEps) {
+        B.x += impulse * B.invMass;
+      }
+
+      auto apply_rotation = [](RigidBody& body, const Vec3& offset,
+                                const Vec3& impulse_vec) {
+        const Vec3 torque = math::cross(offset, impulse_vec);
+        const Vec3 ang = body.invInertiaWorld * torque;
+        const double angle = math::length(ang);
+        if (angle <= math::kEps) {
+          return;
+        }
+        const Vec3 axis = ang / angle;
+        body.q = math::Quat::from_axis_angle(axis, angle) * body.q;
+        body.q.normalize();
+      };
+
+      if (math::length2(world_la) > math::kEps * math::kEps &&
+          A.invMass > math::kEps) {
+        apply_rotation(A, world_la, impulse);
+      }
+      if (math::length2(world_lb) > math::kEps * math::kEps &&
+          B.invMass > math::kEps) {
+        apply_rotation(B, world_lb, -impulse);
+      }
+
+      A.syncDerived();
+      B.syncDerived();
     }
   }
 

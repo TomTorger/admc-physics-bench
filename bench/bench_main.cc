@@ -15,6 +15,7 @@
 #include "solver_baseline_vec.hpp"
 #include "solver_scalar_cached.hpp"
 #include "solver_scalar_soa.hpp"
+#include "solver_scalar_soa_fourth.hpp"
 #include "solver_scalar_soa_mt.hpp"
 #include "solver_scalar_soa_simd.hpp"
 #include "soa_pack.hpp"
@@ -30,6 +31,7 @@
 #include <optional>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -223,6 +225,18 @@ void print_run_summary(const BenchmarkResult& result) {
   }
 }
 
+enum class SoaSolverVariant {
+  kLegacy,
+  kFourth,
+};
+
+BenchmarkResult run_soa_variant_result(const std::string& scene_name,
+                                       const Scene& base_scene,
+                                       const SoaParams& params,
+                                       int steps,
+                                       double ms_per_step_hint,
+                                       SoaSolverVariant variant);
+
 BenchmarkResult run_soa_result(const std::string& scene_name,
                                const Scene& base_scene,
                                const SoaParams& params,
@@ -234,6 +248,18 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
                                const SolverParams& params,
                                int steps,
                                double ms_per_step_hint);
+
+BenchmarkResult run_soa_fourth_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SoaParams& params,
+                                      int steps,
+                                      double ms_per_step_hint);
+
+BenchmarkResult run_soa_fourth_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SolverParams& params,
+                                      int steps,
+                                      double ms_per_step_hint);
 
 std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
                                                const std::string& scene_name,
@@ -252,6 +278,9 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   } else if (normalized == "scalar_soa" || normalized == "soa_simd" ||
              normalized == "soa_mt") {
     normalized = "soa";
+  } else if (normalized == "scalar_soa_fourth" || normalized == "soa4" ||
+             normalized == "soa_fourth") {
+    normalized = "soa_fourth";
   } else if (normalized == "baseline_vec") {
     normalized = "baseline";
   }
@@ -298,6 +327,16 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     BenchmarkResult soa_result =
         run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
     return soa_result;
+  } else if (normalized == "soa_fourth") {
+    SoaParams params;
+    params.iterations = safe_iterations;
+    params.dt = dt;
+    params.use_threads = (safe_threads > 1);
+    params.thread_count = safe_threads;
+    configure_solver_params(scene_name, params);
+    BenchmarkResult soa_result = run_soa_fourth_result(scene_name, base_scene,
+                                                       params, safe_steps, -1.0);
+    return soa_result;
   } else {
     std::cerr << "Unknown solver: " << solver_name << "\n";
     return std::nullopt;
@@ -343,18 +382,22 @@ void run_default_suite(const std::string& csv_path) {
       {"two_spheres", "baseline", 10, 1},
       {"two_spheres", "cached", 10, 1},
       {"two_spheres", "soa", 10, 1},
+      {"two_spheres", "soa_fourth", 10, 1},
       {"spheres_cloud_1024", "baseline", 10, 30},
       {"spheres_cloud_1024", "cached", 10, 30},
       {"spheres_cloud_1024", "soa", 10, 30},
+      {"spheres_cloud_1024", "soa_fourth", 10, 30},
       {"box_stack_4", "baseline", 10, 30},
       {"box_stack_4", "cached", 10, 30},
       {"box_stack_4", "soa", 10, 30},
+      {"box_stack_4", "soa_fourth", 10, 30},
   };
 
   const char* run_large_env = std::getenv("RUN_LARGE");
   if (run_large_env && std::string(run_large_env) == "1") {
     cases.push_back({"spheres_cloud_8192", "cached", 10, 30});
     cases.push_back({"spheres_cloud_8192", "soa", 10, 30});
+    cases.push_back({"spheres_cloud_8192", "soa_fourth", 10, 30});
   }
 
   std::vector<BenchmarkResult> results;
@@ -397,7 +440,7 @@ bool run_cli_mode(const CliOptions& opts) {
 
   std::vector<std::string> solvers;
   if (opts.solver == "auto") {
-    solvers = {"baseline", "cached", "soa"};
+    solvers = {"baseline", "cached", "soa", "soa_fourth"};
   } else {
     solvers.push_back(opts.solver);
   }
@@ -629,6 +672,40 @@ void BenchSpheresCloudSoA4096(benchmark::State& state) {
   }
 }
 
+void BenchSpheresCloudSoA4096Fourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_spheres_box_cloud(4096);
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.005;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 60.0;
+  params.mu = 0.5;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("spheres_box_cloud_4096", base_scene,
+                                        params, kStepsPerRun, ms_per_step));
+    recorded = true;
+  }
+}
+
 void BenchSpheresCloudBaseline8192(benchmark::State& state) {
   static bool recorded = false;
   const Scene base_scene = make_spheres_box_cloud(8192);
@@ -683,6 +760,40 @@ void BenchSpheresCloudCached8192(benchmark::State& state) {
   if (state.thread_index == 0 && !recorded) {
     record_result(run_cached_result("spheres_box_cloud_8192", base_scene, params,
                                     kStepsPerRun, ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchSpheresCloudSoA8192Fourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_spheres_box_cloud(8192);
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.005;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 60.0;
+  params.mu = 0.5;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("spheres_box_cloud_8192", base_scene,
+                                        params, kStepsPerRun, ms_per_step));
     recorded = true;
   }
 }
@@ -813,6 +924,40 @@ void BenchBoxStackSoA(benchmark::State& state) {
   }
 }
 
+void BenchBoxStackSoAFourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_box_stack(8);
+  SolverParams params;
+  params.beta = 0.2;
+  params.slop = 0.005;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 60.0;
+  params.mu = 0.5;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("box_stack_8", base_scene, params,
+                                        kStepsPerRun, ms_per_step));
+    recorded = true;
+  }
+}
+
 void BenchPendulumCached(benchmark::State& state) {
   static bool recorded = false;
   const Scene base_scene = make_pendulum(1);
@@ -872,6 +1017,40 @@ void BenchPendulumSoA(benchmark::State& state) {
   if (state.thread_index == 0 && !recorded) {
     record_result(run_soa_result("pendulum", base_scene, params, kStepsPerRun,
                                  ms_per_step));
+    recorded = true;
+  }
+}
+
+void BenchPendulumSoAFourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_pendulum(1);
+  SolverParams params;
+  params.beta = 0.1;
+  params.slop = 0.0025;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.3;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("pendulum", base_scene, params,
+                                        kStepsPerRun, ms_per_step));
     recorded = true;
   }
 }
@@ -938,6 +1117,40 @@ void BenchChainSoA(benchmark::State& state) {
   }
 }
 
+void BenchChainSoAFourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_chain_64();
+  SolverParams params;
+  params.beta = 0.05;
+  params.slop = 0.001;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("chain_64", base_scene, params,
+                                        kStepsPerRun, ms_per_step));
+    recorded = true;
+  }
+}
+
 void BenchRopeCached(benchmark::State& state) {
   static bool recorded = false;
   const Scene base_scene = make_rope_256();
@@ -1000,13 +1213,88 @@ void BenchRopeSoA(benchmark::State& state) {
   }
 }
 
+void BenchRopeSoAFourth(benchmark::State& state) {
+  static bool recorded = false;
+  const Scene base_scene = make_rope_256();
+  SolverParams params;
+  params.beta = 0.05;
+  params.slop = 0.001;
+  params.restitution = 0.0;
+  params.iterations = 10;
+  params.dt = 1.0 / 120.0;
+  params.mu = 0.0;
+  params.warm_start = true;
+
+  const double ms_per_step = run_benchmark_loop(
+      state, base_scene,
+      [&, rows = RowSOA{}, joint_rows = JointSOA{}](
+          std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+          std::vector<DistanceJoint>& joints) mutable {
+        build_contact_offsets_and_bias(bodies, contacts, params);
+        build_soa(bodies, contacts, params, rows);
+        build_distance_joint_rows(bodies, joints, params.dt);
+        build_joint_soa(bodies, joints, params.dt, joint_rows);
+        solve_scalar_soa_fourth(bodies, contacts, rows, joint_rows, params);
+        scatter_joint_impulses(joint_rows, joints);
+      });
+
+  update_counters(state, base_scene, ms_per_step);
+
+  if (state.thread_index == 0 && !recorded) {
+    record_result(run_soa_fourth_result("rope_256", base_scene, params,
+                                        kStepsPerRun, ms_per_step));
+    recorded = true;
+  }
+}
+
 #endif  // ADMC_HAVE_GBENCH
 
-BenchmarkResult run_soa_result(const std::string& scene_name,
-                               const Scene& base_scene,
-                               const SoaParams& params,
-                               int steps,
-                               double ms_per_step_hint) {
+namespace {
+
+using SoaSolveFn = void (*)(std::vector<RigidBody>&,
+                            std::vector<Contact>&,
+                            RowSOA&,
+                            JointSOA&,
+                            const SoaParams&,
+                            SolverDebugInfo*);
+
+SoaSolveFn select_solver(SoaSolverVariant variant) {
+  switch (variant) {
+    case SoaSolverVariant::kLegacy:
+      return [](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+                RowSOA& rows, JointSOA& joints, const SoaParams& params,
+                SolverDebugInfo* debug_info) {
+        solve_scalar_soa(bodies, contacts, rows, joints, params, debug_info);
+      };
+    case SoaSolverVariant::kFourth:
+      return [](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+                RowSOA& rows, JointSOA& joints, const SoaParams& params,
+                SolverDebugInfo* debug_info) {
+        solve_scalar_soa_fourth(bodies, contacts, rows, joints, params,
+                                debug_info);
+      };
+  }
+  return nullptr;
+}
+
+const char* solver_label(SoaSolverVariant variant) {
+  switch (variant) {
+    case SoaSolverVariant::kLegacy:
+      return "scalar_soa";
+    case SoaSolverVariant::kFourth:
+      return "scalar_soa_fourth";
+  }
+  return "scalar_soa";
+}
+
+}  // namespace
+
+BenchmarkResult run_soa_variant_result(const std::string& scene_name,
+                                       const Scene& base_scene,
+                                       const SoaParams& params,
+                                       int steps,
+                                       double ms_per_step_hint,
+                                       SoaSolverVariant variant) {
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
   std::vector<DistanceJoint> joints = base_scene.joints;
@@ -1016,6 +1304,10 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
   aggregate_debug.reset();
   RowSOA rows;
   JointSOA joint_rows;
+  SoaSolveFn solver = select_solver(variant);
+  if (!solver) {
+    throw std::runtime_error("Unknown SoA solver variant");
+  }
   for (int i = 0; i < steps; ++i) {
     SolverDebugInfo step_debug;
     SoaTimingBreakdown step_timings;
@@ -1043,7 +1335,7 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
     step_timings.joint_pack_ms += elapsed_ms(joint_pack_begin, joint_pack_end);
 
     const auto solver_begin = Clock::now();
-    solve_scalar_soa(bodies, contacts, rows, joint_rows, params, &step_debug);
+    solver(bodies, contacts, rows, joint_rows, params, &step_debug);
     const auto solver_end = Clock::now();
     double solver_ms = step_debug.timings.solver_total_ms;
     if (solver_ms <= 0.0) {
@@ -1069,7 +1361,7 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
   build_distance_joint_rows(bodies, joints, params.dt);
   BenchmarkResult result;
   result.scene = scene_name;
-  result.solver = "scalar_soa";
+  result.solver = solver_label(variant);
   result.iterations = params.iterations;
   result.steps = steps;
   result.dt = params.dt;
@@ -1100,12 +1392,41 @@ BenchmarkResult run_soa_result(const std::string& scene_name,
 
 BenchmarkResult run_soa_result(const std::string& scene_name,
                                const Scene& base_scene,
+                               const SoaParams& params,
+                               int steps,
+                               double ms_per_step_hint) {
+  return run_soa_variant_result(scene_name, base_scene, params, steps,
+                                ms_per_step_hint, SoaSolverVariant::kLegacy);
+}
+
+BenchmarkResult run_soa_fourth_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SoaParams& params,
+                                      int steps,
+                                      double ms_per_step_hint) {
+  return run_soa_variant_result(scene_name, base_scene, params, steps,
+                                ms_per_step_hint, SoaSolverVariant::kFourth);
+}
+
+BenchmarkResult run_soa_result(const std::string& scene_name,
+                               const Scene& base_scene,
                                const SolverParams& params,
                                int steps,
                                double ms_per_step_hint) {
   SoaParams derived;
   static_cast<SolverParams&>(derived) = params;
   return run_soa_result(scene_name, base_scene, derived, steps, ms_per_step_hint);
+}
+
+BenchmarkResult run_soa_fourth_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SolverParams& params,
+                                      int steps,
+                                      double ms_per_step_hint) {
+  SoaParams derived;
+  static_cast<SolverParams&>(derived) = params;
+  return run_soa_fourth_result(scene_name, base_scene, derived, steps,
+                               ms_per_step_hint);
 }
 
 
@@ -1510,18 +1831,24 @@ void MicrobenchSoaMtScaling(benchmark::State& state) {
 BENCHMARK(BenchSpheresCloudBaseline4096)->UseManualTime();
 BENCHMARK(BenchSpheresCloudCached4096)->UseManualTime();
 BENCHMARK(BenchSpheresCloudSoA4096)->UseManualTime();
+BENCHMARK(BenchSpheresCloudSoA4096Fourth)->UseManualTime();
 BENCHMARK(BenchSpheresCloudBaseline8192)->UseManualTime();
 BENCHMARK(BenchSpheresCloudCached8192)->UseManualTime();
 BENCHMARK(BenchSpheresCloudSoA8192)->UseManualTime();
+BENCHMARK(BenchSpheresCloudSoA8192Fourth)->UseManualTime();
 BENCHMARK(BenchBoxStackBaseline)->UseManualTime();
 BENCHMARK(BenchBoxStackCached)->UseManualTime();
 BENCHMARK(BenchBoxStackSoA)->UseManualTime();
+BENCHMARK(BenchBoxStackSoAFourth)->UseManualTime();
 BENCHMARK(BenchPendulumCached)->UseManualTime();
 BENCHMARK(BenchPendulumSoA)->UseManualTime();
+BENCHMARK(BenchPendulumSoAFourth)->UseManualTime();
 BENCHMARK(BenchChainCached)->UseManualTime();
 BENCHMARK(BenchChainSoA)->UseManualTime();
+BENCHMARK(BenchChainSoAFourth)->UseManualTime();
 BENCHMARK(BenchRopeCached)->UseManualTime();
 BENCHMARK(BenchRopeSoA)->UseManualTime();
+BENCHMARK(BenchRopeSoAFourth)->UseManualTime();
 BENCHMARK(MicrobenchUpdateNormal)->Arg(0)->Arg(1)->UseManualTime();
 BENCHMARK(MicrobenchUpdateTangent)->Arg(0)->Arg(1)->UseManualTime();
 BENCHMARK(MicrobenchApplyImpulses)->Arg(0)->Arg(1)->UseManualTime();

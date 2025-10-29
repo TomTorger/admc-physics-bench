@@ -4,6 +4,7 @@
 
 namespace {
 constexpr double kDirEps = 1e-9;
+constexpr double kJointBiasBoost = 1.05;
 }
 
 void build_distance_joint_rows(const std::vector<RigidBody>& bodies,
@@ -83,7 +84,7 @@ void build_joint_soa(const std::vector<RigidBody>& bodies,
 
     double bias = 0.0;
     if (dt > math::kEps) {
-      bias = -(joint.beta * inv_dt) * joint.C;
+      bias = (joint.beta * inv_dt) * joint.C * kJointBiasBoost;
     }
 
     rows.indices.push_back(static_cast<int>(i));
@@ -98,6 +99,8 @@ void build_joint_soa(const std::vector<RigidBody>& bodies,
     rows.j.push_back(joint.jd);
     rows.rope.push_back(static_cast<uint8_t>(joint.rope ? 1 : 0));
     rows.C.push_back(joint.C);
+    rows.rest.push_back(joint.rest);
+    rows.beta.push_back(joint.beta);
   }
 }
 

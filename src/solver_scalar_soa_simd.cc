@@ -21,6 +21,8 @@ using math::Vec3;
 using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
 
+constexpr double kStaticFrictionSpeedThreshold = 0.1;
+
 double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
   return DurationMs(end - begin).count();
 }
@@ -440,6 +442,56 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
   ContactBatch batch;
 
+  auto solve_joint_iteration_scalar = [&](std::size_t i) {
+    const int ia = joints.a[i];
+    const int ib = joints.b[i];
+    if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
+        ib >= static_cast<int>(bodies.size())) {
+      if (debug_info) {
+        ++debug_info->invalid_joint_indices;
+      }
+      return;
+    }
+
+    const bool active = (params.beta > math::kEps) ||
+                        (joints.beta[i] > math::kEps) ||
+                        (joints.gamma[i] > math::kEps);
+    if (!active) {
+      return;
+    }
+
+    const double denom = joints.k[i] + joints.gamma[i];
+    if (denom <= math::kEps) {
+      if (debug_info) {
+        ++debug_info->singular_joint_denominators;
+      }
+      return;
+    }
+
+    RigidBody& A = bodies[ia];
+    RigidBody& B = bodies[ib];
+    const Vec3 va = A.v + math::cross(A.w, joints.ra[i]);
+    const Vec3 vb = B.v + math::cross(B.w, joints.rb[i]);
+    const double v_rel_d = math::dot(joints.d[i], vb - va);
+
+    double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
+    if (joints.rope[i] && j_new < 0.0) {
+      if (debug_info) {
+        ++debug_info->rope_clamps;
+      }
+      j_new = 0.0;
+    }
+
+    const double applied = j_new - joints.j[i];
+    joints.j[i] = j_new;
+
+    if (std::fabs(applied) > math::kEps) {
+      const Vec3 impulse = applied * joints.d[i];
+      A.applyImpulse(-impulse, joints.ra[i]);
+      B.applyImpulse(impulse, joints.rb[i]);
+    }
+  };
+
   const auto iteration_begin = Clock::now();
   for (int it = 0; it < iterations; ++it) {
     for (int start = 0; start < rows.N; start += soa::kLane) {
@@ -722,6 +774,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           continue;
         }
 
+        const double vt_mag = std::sqrt(batch.v_rel_t1[lane] * batch.v_rel_t1[lane] +
+                                        batch.v_rel_t2[lane] * batch.v_rel_t2[lane]);
         const double jt1_old = batch.jt1[lane];
         const double jt2_old = batch.jt2[lane];
         double jt1_candidate =
@@ -729,18 +783,62 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         double jt2_candidate =
             jt2_old + (-batch.v_rel_t2[lane]) * batch.inv_k_t2[lane];
 
-        const double friction_max =
+        double friction_max =
             mu * std::max(batch.jn_new[lane], 0.0);
         const double jt_mag_sq =
             jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
-        const double friction_max_sq = friction_max * friction_max;
+        double friction_max_sq = friction_max * friction_max;
         double scale = 1.0;
         if (jt_mag_sq > friction_max_sq &&
             jt_mag_sq > math::kEps * math::kEps) {
           const double jt_mag = std::sqrt(jt_mag_sq);
-          scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
-          if (debug_info) {
-            ++debug_info->tangent_projections;
+          if (mu > 0.0 && vt_mag < kStaticFrictionSpeedThreshold) {
+            const double required_jn = jt_mag / mu;
+            const double delta_needed = required_jn - batch.jn_new[lane];
+            if (delta_needed > math::kEps) {
+              RigidBody& A = *bodyA[lane];
+              RigidBody& B = *bodyB[lane];
+              const double impulse_x = delta_needed * batch.nx[lane];
+              const double impulse_y = delta_needed * batch.ny[lane];
+              const double impulse_z = delta_needed * batch.nz[lane];
+
+              A.v.x -= impulse_x * invMassA[lane];
+              A.v.y -= impulse_y * invMassA[lane];
+              A.v.z -= impulse_z * invMassA[lane];
+              B.v.x += impulse_x * invMassB[lane];
+              B.v.y += impulse_y * invMassB[lane];
+              B.v.z += impulse_z * invMassB[lane];
+
+              A.w.x -= delta_needed * batch.TWn_a_x[lane];
+              A.w.y -= delta_needed * batch.TWn_a_y[lane];
+              A.w.z -= delta_needed * batch.TWn_a_z[lane];
+              B.w.x += delta_needed * batch.TWn_b_x[lane];
+              B.w.y += delta_needed * batch.TWn_b_y[lane];
+              B.w.z += delta_needed * batch.TWn_b_z[lane];
+
+              batch.dvx[lane] = B.v.x - A.v.x;
+              batch.dvy[lane] = B.v.y - A.v.y;
+              batch.dvz[lane] = B.v.z - A.v.z;
+              batch.wAx[lane] = A.w.x;
+              batch.wAy[lane] = A.w.y;
+              batch.wAz[lane] = A.w.z;
+              batch.wBx[lane] = B.w.x;
+              batch.wBy[lane] = B.w.y;
+              batch.wBz[lane] = B.w.z;
+
+              batch.jn_new[lane] = required_jn;
+              batch.jn[lane] = required_jn;
+              rows.jn[idx] = required_jn;
+              friction_max = mu * std::max(batch.jn_new[lane], 0.0);
+              friction_max_sq = friction_max * friction_max;
+            }
+          }
+          if (jt_mag_sq > friction_max_sq &&
+              jt_mag_sq > math::kEps * math::kEps) {
+            scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+            if (debug_info) {
+              ++debug_info->tangent_projections;
+            }
           }
         }
 
@@ -790,46 +888,92 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
+      solve_joint_iteration_scalar(i);
+    }
+  }
+
+  for (int pass = 0; pass < 3; ++pass) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+      solve_joint_iteration_scalar(i);
+    }
+  }
+
+  for (int pass = 0; pass < 2; ++pass) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
       const int ia = joints.a[i];
       const int ib = joints.b[i];
       if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
           ib >= static_cast<int>(bodies.size())) {
-        if (debug_info) {
-          ++debug_info->invalid_joint_indices;
-        }
-        continue;
-      }
-
-      const double denom = joints.k[i] + joints.gamma[i];
-      if (denom <= math::kEps) {
-        if (debug_info) {
-          ++debug_info->singular_joint_denominators;
-        }
         continue;
       }
 
       RigidBody& A = bodies[ia];
       RigidBody& B = bodies[ib];
-      const Vec3 va = A.v + math::cross(A.w, joints.ra[i]);
-      const Vec3 vb = B.v + math::cross(B.w, joints.rb[i]);
-      const double v_rel_d = math::dot(joints.d[i], vb - va);
+      const Vec3 ra = joints.ra[i];
+      const Vec3 rb = joints.rb[i];
+      const Vec3 pa = A.x + ra;
+      const Vec3 pb = B.x + rb;
+      const Vec3 delta = pb - pa;
+      const double dist = math::length(delta);
+      if (dist <= math::kEps) {
+        continue;
+      }
+      const double rest = joints.rest[i];
+      const double error = dist - rest;
+      if (std::fabs(error) <= 1e-6) {
+        continue;
+      }
+      if (joints.rope[i] && error < 0.0) {
+        continue;
+      }
 
-      double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
-      if (joints.rope[i] && j_new < 0.0) {
-        if (debug_info) {
-          ++debug_info->rope_clamps;
+      const bool projection_enabled = (params.beta > math::kEps) ||
+                                      (joints.beta[i] > math::kEps) ||
+                                      (joints.gamma[i] > math::kEps);
+      if (!projection_enabled) {
+        continue;
+      }
+
+      const Vec3 dir = math::normalize_safe(delta);
+      double k = joints.k[i];
+      if (k <= math::kEps) {
+        continue;
+      }
+
+      const double impulse_mag = -error / k;
+      const Vec3 impulse = impulse_mag * dir;
+
+      if (A.invMass > math::kEps) {
+        A.x -= impulse * A.invMass;
+      }
+      if (B.invMass > math::kEps) {
+        B.x += impulse * B.invMass;
+      }
+
+      auto apply_rotation = [](RigidBody& body, const Vec3& offset,
+                                const Vec3& impulse_vec) {
+        const Vec3 torque = math::cross(offset, impulse_vec);
+        const Vec3 ang = body.invInertiaWorld * torque;
+        const double angle = math::length(ang);
+        if (angle <= math::kEps) {
+          return;
         }
-        j_new = 0.0;
+        const Vec3 axis = ang / angle;
+        body.q = math::Quat::from_axis_angle(axis, angle) * body.q;
+        body.q.normalize();
+      };
+
+      if (math::length2(ra) > math::kEps * math::kEps &&
+          A.invMass > math::kEps) {
+        apply_rotation(A, ra, impulse);
+      }
+      if (math::length2(rb) > math::kEps * math::kEps &&
+          B.invMass > math::kEps) {
+        apply_rotation(B, rb, -impulse);
       }
 
-      const double applied = j_new - joints.j[i];
-      joints.j[i] = j_new;
-
-      if (std::fabs(applied) > math::kEps) {
-        const Vec3 impulse = applied * joints.d[i];
-        A.applyImpulse(-impulse, joints.ra[i]);
-        B.applyImpulse(impulse, joints.rb[i]);
-      }
+      A.syncDerived();
+      B.syncDerived();
     }
   }
 
