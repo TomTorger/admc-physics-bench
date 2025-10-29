@@ -1,6 +1,7 @@
 #include "solver_scalar_soa_vectorized.hpp"
 
 #include "solver_scalar_soa.hpp"
+#include "solver_scalar_soa_simd.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -56,18 +57,14 @@ void sanitize_solver_timings(SolverDebugInfo* info,
   }
 }
 
-void forward_to_scalar(std::vector<RigidBody>& bodies,
-                       std::vector<Contact>& contacts,
-                       RowSOA& rows,
-                       JointSOA& joints,
-                       const SoaParams& params,
-                       SolverDebugInfo* debug_info) {
-  // For the initial drop we simply forward to the existing scalar implementation
-  // so the vectorized solver integrates with the surrounding pipeline while more
-  // advanced kernels are built out. Record a wall-clock duration to provide
-  // consistent timing data to the benchmarking harness.
+void run_vectorized(std::vector<RigidBody>& bodies,
+                    std::vector<Contact>& contacts,
+                    RowSOA& rows,
+                    JointSOA& joints,
+                    const SoaParams& params,
+                    SolverDebugInfo* debug_info) {
   const auto solver_begin = Clock::now();
-  solve_scalar_soa_scalar(bodies, contacts, rows, joints, params, debug_info);
+  solve_scalar_soa_simd(bodies, contacts, rows, joints, params, debug_info);
   const auto solver_end = Clock::now();
   sanitize_solver_timings(debug_info, elapsed_ms(solver_begin, solver_end));
 }
@@ -81,8 +78,8 @@ void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
                                  const SoaParams& params,
                                  SolverDebugInfo* debug_info) {
   SolverDebugInfo local_info;
-  forward_to_scalar(bodies, contacts, rows, joints, params,
-                    debug_info ? debug_info : &local_info);
+  run_vectorized(bodies, contacts, rows, joints, params,
+                 debug_info ? debug_info : &local_info);
 }
 
 void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
@@ -93,8 +90,8 @@ void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
   static JointSOA empty_joints;
   empty_joints.clear();
   SolverDebugInfo local_info;
-  forward_to_scalar(bodies, contacts, rows, empty_joints, params,
-                    debug_info ? debug_info : &local_info);
+  run_vectorized(bodies, contacts, rows, empty_joints, params,
+                 debug_info ? debug_info : &local_info);
 }
 
 void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
@@ -106,8 +103,8 @@ void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
   SoaParams derived;
   static_cast<SolverParams&>(derived) = params;
   SolverDebugInfo local_info;
-  forward_to_scalar(bodies, contacts, rows, joints, derived,
-                    debug_info ? debug_info : &local_info);
+  run_vectorized(bodies, contacts, rows, joints, derived,
+                 debug_info ? debug_info : &local_info);
 }
 
 void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,

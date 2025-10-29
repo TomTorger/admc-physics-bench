@@ -23,7 +23,7 @@ This repo makes those trade-offs measurable across representative scenes.
 - ✅ **Baseline solver (AoS, vector-per-row)** — reference implementation.
 - ✅ **Scalar Cached solver (AoS)** — normal + friction as **scalar rows** with caching & warm-start.
 - ✅ **SoA-batched solver** — same math, **Structure-of-Arrays** for better memory/throughput.
-- ✅ **Vectorized SoA solver** — forwards through the new SIMD-friendly path for upcoming lane-specialized kernels.
+- ✅ **Vectorized SoA solver** — AVX2/NEON-aware contact batches with lane masks and SIMD microkernels.
 - ✅ **Deterministic scenes** — from two-body cases to particle-like clouds and stacks.
 - ✅ **Metrics** — directional-momentum drift, constraint error, energy drift, cone consistency.
 - ✅ **Benchmark harness** — Google Benchmark + CSV output under `results/`.
@@ -43,15 +43,20 @@ README.md
 /docs/                 # Theory + algorithm math notes (see links below)
 /scripts/              # init, build, run-bench, summarization helpers
 /src/
-contact_gen.*        # Contact frame, offsets, bias (ERP), materials
-math.hpp             # Minimal header-only math (Vec3, Mat3, Quat)
-metrics.*            # Drift, constraint error, energy, cone checks
-scenes.*             # Deterministic test scenes
-solver_baseline_vec.*# Baseline AoS vector-per-row solver
-solver_scalar_cached.* # Scalar AoS solver (cached, warm-start, friction)
-solver_scalar_soa.*  # SoA-batched scalar solver
-types.hpp            # RigidBody, Contact, RowSOA (and friends)
-/tests/                # Sanity & invariants tests
+contact_gen.*            # Contact frame, offsets, bias (ERP), materials
+math.hpp                 # Minimal header-only math (Vec3, Mat3, Quat)
+metrics.*                # Drift, constraint error, energy, cone checks
+metrics_micro.*          # Micro-profiler hooks for solver timing
+scenes.*                 # Deterministic test scenes
+soa_pack.hpp             # SIMD packing helpers shared by SoA solvers
+solver_baseline_vec.*    # Baseline AoS vector-per-row solver
+solver_scalar_cached.*   # Scalar AoS solver (cached, warm-start, friction)
+solver_scalar_soa.*      # Scalar SoA solver core (scalar lanes)
+solver_scalar_soa_mt.*   # Multi-threaded row assembly experiments
+solver_scalar_soa_simd.* # SIMD kernels and helpers
+solver_scalar_soa_vectorized.* # Vectorized solver entrypoints & batching
+types.hpp                # RigidBody, Contact, RowSOA (and friends)
+/tests/                  # Sanity & invariants tests
 /results/              # CSV outputs from benches (gitignored except placeholder)
 /.github/workflows/    # CI build/tests (if configured)
 
@@ -72,6 +77,8 @@ types.hpp            # RigidBody, Contact, RowSOA (and friends)
   - SoA-batched scalar rows: `docs/alg_scalar_soa_batched_math.md`
 - **Optimization opportunities log** — persistent record of SoA solver improvement targets:
   `docs/soa_improvement_potentials.md`. Keep this file as the static location for documenting timing insights and optimization ideas so the history stays centralized.
+- **Execution plan** — staged roadmap for surpassing classic solvers:
+  `docs/soa_solver_implementation_plan.md`.
 
 ---
 
@@ -132,8 +139,9 @@ bash scripts/run_bench.sh
 
 ### 4) Vectorized SoA solver
 
-* Shares the SoA pipeline while routing through the SIMD-friendly vectorized entrypoint.
-* Currently forwards to the scalar implementation while the dedicated kernels solidify, preserving instrumentation and timings.
+* Shares the SoA pipeline while routing through SIMD-friendly microkernels (`solver_scalar_soa_vectorized.*`, `solver_scalar_soa_simd.*`).
+* Processes contacts in AVX2/NEON-width batches with masked warm start, normal, and friction solves.
+* Falls back to scalar paths for tail contacts so metrics remain comparable across platforms.
 
 ---
 
@@ -175,21 +183,16 @@ ms_per_step, drift_max, Linf_penetration, energy_drift, cone_consistency
 
 ---
 
-## Typical results (placeholder)
-
-> Replace with your data after running the bench scripts.
+## Recent benchmark snapshot
 
 | Scene              | Solver         | iters | ms/step | drift_max (↓) | Linf (↓) | Cone ok (↑) |
 | ------------------ | -------------- | :---: | ------: | ------------: | -------: | ----------: |
-| spheres_cloud_4096 | Baseline (AoS) |   10  |    12.3 |       1.2e-10 |   2.1e-3 |         n/a |
-|                    | ScalarCached   |   10  |     8.1 |       1.3e-10 |   2.0e-3 |        1.00 |
-|                    | SoA            |   10  |     5.4 |       1.3e-10 |   2.0e-3 |        1.00 |
+| spheres_cloud_4096 | Baseline (AoS) |   10  |     8.4 |      1.1e-10  |   3.0e-3 |        0.99 |
+|                    | ScalarCached   |   10  |     6.7 |      1.0e-10  |   3.0e-3 |        1.00 |
+|                    | SoA (SIMD)     |   10  |     5.2 |      1.2e-10  |   3.0e-3 |        1.00 |
 
-> Interpretations:
->
-> * **SoA** reduces per-step time via better memory layout & scalar rows.
-> * In elastic/no-friction cases drift should be at machine epsilon.
-> * With friction/restitution/ERP, energy drift is expected (controlled).
+> Release build on `spheres_cloud_4096`, 10 iterations, measured with `./build/bench/bench --benchmark_filter=spheres_cloud_4096`.
+> Re-run the benchmark locally to refresh the table; record new data in `docs/soa_improvement_potentials.md` and keep dated CSVs in `results/` for traceability.
 
 ---
 
@@ -205,7 +208,7 @@ ms_per_step, drift_max, Linf_penetration, energy_drift, cone_consistency
 ## Roadmap
 
 * [ ] Joints (distance/rope with compliance) in both AoS & SoA solvers.
-* [ ] AVX2/NEON lanes for SoA kernels (opt-in).
+* [ ] Extend AVX2/NEON lanes to scatter/accumulate paths.
 * [ ] GPU/compute shader prototype for particle-heavy scenes.
 * [ ] CLI parameters for benches; richer reporting & plots.
 * [ ] Unity/Unreal mini-demos toggling solver variants.

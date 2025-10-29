@@ -28,59 +28,25 @@ double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) 
   return DurationMs(end - begin).count();
 }
 
-struct BodySoA {
-  std::vector<double> vx;
-  std::vector<double> vy;
-  std::vector<double> vz;
-  std::vector<double> wx;
-  std::vector<double> wy;
-  std::vector<double> wz;
-
-  explicit BodySoA(std::size_t count)
-      : vx(count, 0.0),
-        vy(count, 0.0),
-        vz(count, 0.0),
-        wx(count, 0.0),
-        wy(count, 0.0),
-        wz(count, 0.0) {}
-
-  void load_from(const std::vector<RigidBody>& bodies) {
-    for (std::size_t i = 0; i < bodies.size(); ++i) {
-      vx[i] = bodies[i].v.x;
-      vy[i] = bodies[i].v.y;
-      vz[i] = bodies[i].v.z;
-      wx[i] = bodies[i].w.x;
-      wy[i] = bodies[i].w.y;
-      wz[i] = bodies[i].w.z;
-    }
-  }
-
-  void store_to(std::vector<RigidBody>& bodies) const {
-    for (std::size_t i = 0; i < bodies.size(); ++i) {
-      bodies[i].v.x = vx[i];
-      bodies[i].v.y = vy[i];
-      bodies[i].v.z = vz[i];
-      bodies[i].w.x = wx[i];
-      bodies[i].w.y = wy[i];
-      bodies[i].w.z = wz[i];
-    }
-  }
-};
-
 inline void apply_impulse_to_body(const RigidBody& body,
-                                  BodySoA& state,
-                                  int index,
+                                  SolverBodySoA& state,
+                                  int body_index,
                                   const Vec3& impulse,
                                   const Vec3& r) {
-  state.vx[static_cast<std::size_t>(index)] += impulse.x * body.invMass;
-  state.vy[static_cast<std::size_t>(index)] += impulse.y * body.invMass;
-  state.vz[static_cast<std::size_t>(index)] += impulse.z * body.invMass;
+  const int slot = state.slot_for_body(body_index);
+  if (slot < 0) {
+    return;
+  }
+
+  state.vx[static_cast<std::size_t>(slot)] += impulse.x * body.invMass;
+  state.vy[static_cast<std::size_t>(slot)] += impulse.y * body.invMass;
+  state.vz[static_cast<std::size_t>(slot)] += impulse.z * body.invMass;
 
   const Vec3 torque = math::cross(r, impulse);
   const Vec3 delta_w = body.invInertiaWorld * torque;
-  state.wx[static_cast<std::size_t>(index)] += delta_w.x;
-  state.wy[static_cast<std::size_t>(index)] += delta_w.y;
-  state.wz[static_cast<std::size_t>(index)] += delta_w.z;
+  state.wx[static_cast<std::size_t>(slot)] += delta_w.x;
+  state.wy[static_cast<std::size_t>(slot)] += delta_w.y;
+  state.wz[static_cast<std::size_t>(slot)] += delta_w.z;
 }
 
 #if defined(ADMC_USE_AVX2)
@@ -309,6 +275,8 @@ struct ContactBatch {
   int start = 0;
   int bodyA_index[soa::kLane] = {};
   int bodyB_index[soa::kLane] = {};
+  int bodyA_slot[soa::kLane] = {};
+  int bodyB_slot[soa::kLane] = {};
   double invMassA[soa::kLane] = {};
   double invMassB[soa::kLane] = {};
   bool lane_valid[soa::kLane] = {};
@@ -400,7 +368,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
     body.syncDerived();
   }
 
-  BodySoA body_state(bodies.size());
+  SolverBodySoA body_state;
+  body_state.initialize(bodies, rows, joints);
   body_state.load_from(bodies);
 
   const auto warmstart_begin = Clock::now();
@@ -445,12 +414,18 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       const double impulse_z = rows.nz[i] * jn + rows.t1z[i] * jt1 +
                                rows.t2z[i] * jt2;
 
-      body_state.vx[ia] -= impulse_x * A.invMass;
-      body_state.vy[ia] -= impulse_y * A.invMass;
-      body_state.vz[ia] -= impulse_z * A.invMass;
-      body_state.vx[ib] += impulse_x * B.invMass;
-      body_state.vy[ib] += impulse_y * B.invMass;
-      body_state.vz[ib] += impulse_z * B.invMass;
+      const int slot_a = body_state.slot_for_body(ia);
+      const int slot_b = body_state.slot_for_body(ib);
+      if (slot_a < 0 || slot_b < 0) {
+        continue;
+      }
+
+      body_state.vx[static_cast<std::size_t>(slot_a)] -= impulse_x * A.invMass;
+      body_state.vy[static_cast<std::size_t>(slot_a)] -= impulse_y * A.invMass;
+      body_state.vz[static_cast<std::size_t>(slot_a)] -= impulse_z * A.invMass;
+      body_state.vx[static_cast<std::size_t>(slot_b)] += impulse_x * B.invMass;
+      body_state.vy[static_cast<std::size_t>(slot_b)] += impulse_y * B.invMass;
+      body_state.vz[static_cast<std::size_t>(slot_b)] += impulse_z * B.invMass;
 
       const double dw_ax = jn * rows.TWn_a_x[i] + jt1 * rows.TWt1_a_x[i] +
                            jt2 * rows.TWt2_a_x[i];
@@ -465,12 +440,12 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       const double dw_bz = jn * rows.TWn_b_z[i] + jt1 * rows.TWt1_b_z[i] +
                            jt2 * rows.TWt2_b_z[i];
 
-      body_state.wx[ia] -= dw_ax;
-      body_state.wy[ia] -= dw_ay;
-      body_state.wz[ia] -= dw_az;
-      body_state.wx[ib] += dw_bx;
-      body_state.wy[ib] += dw_by;
-      body_state.wz[ib] += dw_bz;
+      body_state.wx[static_cast<std::size_t>(slot_a)] -= dw_ax;
+      body_state.wy[static_cast<std::size_t>(slot_a)] -= dw_ay;
+      body_state.wz[static_cast<std::size_t>(slot_a)] -= dw_az;
+      body_state.wx[static_cast<std::size_t>(slot_b)] += dw_bx;
+      body_state.wy[static_cast<std::size_t>(slot_b)] += dw_by;
+      body_state.wz[static_cast<std::size_t>(slot_b)] += dw_bz;
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -578,8 +553,13 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
         batch.bodyA_index[lane] = ia;
         batch.bodyB_index[lane] = ib;
+        const int slot_a = body_state.slot_for_body(ia);
+        const int slot_b = body_state.slot_for_body(ib);
+        batch.bodyA_slot[lane] = slot_a;
+        batch.bodyB_slot[lane] = slot_b;
         if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
-            ib >= static_cast<int>(bodies.size())) {
+            ib >= static_cast<int>(bodies.size()) || slot_a < 0 ||
+            slot_b < 0) {
           if (debug_info) {
             ++debug_info->invalid_contact_indices;
           }
@@ -628,12 +608,29 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       return;
     }
 
+    const int slot_a = body_state.slot_for_body(ia);
+    const int slot_b = body_state.slot_for_body(ib);
+    if (slot_a < 0 || slot_b < 0) {
+      if (debug_info) {
+        ++debug_info->invalid_joint_indices;
+      }
+      return;
+    }
+
     const RigidBody& A = bodies[ia];
     const RigidBody& B = bodies[ib];
-    const Vec3 va(body_state.vx[ia], body_state.vy[ia], body_state.vz[ia]);
-    const Vec3 wa(body_state.wx[ia], body_state.wy[ia], body_state.wz[ia]);
-    const Vec3 vb(body_state.vx[ib], body_state.vy[ib], body_state.vz[ib]);
-    const Vec3 wb(body_state.wx[ib], body_state.wy[ib], body_state.wz[ib]);
+    const Vec3 va(body_state.vx[static_cast<std::size_t>(slot_a)],
+                  body_state.vy[static_cast<std::size_t>(slot_a)],
+                  body_state.vz[static_cast<std::size_t>(slot_a)]);
+    const Vec3 wa(body_state.wx[static_cast<std::size_t>(slot_a)],
+                  body_state.wy[static_cast<std::size_t>(slot_a)],
+                  body_state.wz[static_cast<std::size_t>(slot_a)]);
+    const Vec3 vb(body_state.vx[static_cast<std::size_t>(slot_b)],
+                  body_state.vy[static_cast<std::size_t>(slot_b)],
+                  body_state.vz[static_cast<std::size_t>(slot_b)]);
+    const Vec3 wb(body_state.wx[static_cast<std::size_t>(slot_b)],
+                  body_state.wy[static_cast<std::size_t>(slot_b)],
+                  body_state.wz[static_cast<std::size_t>(slot_b)]);
     const Vec3 va_world = va + math::cross(wa, joints.ra[i]);
     const Vec3 vb_world = vb + math::cross(wb, joints.rb[i]);
     const double v_rel_d = math::dot(joints.d[i], vb_world - va_world);
@@ -678,17 +675,20 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           continue;
         }
 
-        const int ia = batch.bodyA_index[lane];
-        const int ib = batch.bodyB_index[lane];
-        batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-        batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-        batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-        batch.wAx[lane] = body_state.wx[ia];
-        batch.wAy[lane] = body_state.wy[ia];
-        batch.wAz[lane] = body_state.wz[ia];
-        batch.wBx[lane] = body_state.wx[ib];
-        batch.wBy[lane] = body_state.wy[ib];
-        batch.wBz[lane] = body_state.wz[ib];
+        const int slot_a = batch.bodyA_slot[lane];
+        const int slot_b = batch.bodyB_slot[lane];
+        batch.dvx[lane] = body_state.vx[static_cast<std::size_t>(slot_b)] -
+                          body_state.vx[static_cast<std::size_t>(slot_a)];
+        batch.dvy[lane] = body_state.vy[static_cast<std::size_t>(slot_b)] -
+                          body_state.vy[static_cast<std::size_t>(slot_a)];
+        batch.dvz[lane] = body_state.vz[static_cast<std::size_t>(slot_b)] -
+                          body_state.vz[static_cast<std::size_t>(slot_a)];
+        batch.wAx[lane] = body_state.wx[static_cast<std::size_t>(slot_a)];
+        batch.wAy[lane] = body_state.wy[static_cast<std::size_t>(slot_a)];
+        batch.wAz[lane] = body_state.wz[static_cast<std::size_t>(slot_a)];
+        batch.wBx[lane] = body_state.wx[static_cast<std::size_t>(slot_b)];
+        batch.wBy[lane] = body_state.wy[static_cast<std::size_t>(slot_b)];
+        batch.wBz[lane] = body_state.wz[static_cast<std::size_t>(slot_b)];
       }
 
       VecD dvx_v = VecD::load(batch.dvx);
@@ -758,43 +758,61 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_x = applied * batch.nx[lane];
           const double impulse_y = applied * batch.ny[lane];
           const double impulse_z = applied * batch.nz[lane];
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
+          const int slot_a = batch.bodyA_slot[lane];
+          const int slot_b = batch.bodyB_slot[lane];
+          body_state.vx[static_cast<std::size_t>(slot_a)] -=
+              impulse_x * batch.invMassA[lane];
+          body_state.vy[static_cast<std::size_t>(slot_a)] -=
+              impulse_y * batch.invMassA[lane];
+          body_state.vz[static_cast<std::size_t>(slot_a)] -=
+              impulse_z * batch.invMassA[lane];
+          body_state.vx[static_cast<std::size_t>(slot_b)] +=
+              impulse_x * batch.invMassB[lane];
+          body_state.vy[static_cast<std::size_t>(slot_b)] +=
+              impulse_y * batch.invMassB[lane];
+          body_state.vz[static_cast<std::size_t>(slot_b)] +=
+              impulse_z * batch.invMassB[lane];
 
-          body_state.wx[ia] -= applied * batch.TWn_a_x[lane];
-          body_state.wy[ia] -= applied * batch.TWn_a_y[lane];
-          body_state.wz[ia] -= applied * batch.TWn_a_z[lane];
-          body_state.wx[ib] += applied * batch.TWn_b_x[lane];
-          body_state.wy[ib] += applied * batch.TWn_b_y[lane];
-          body_state.wz[ib] += applied * batch.TWn_b_z[lane];
+          body_state.wx[static_cast<std::size_t>(slot_a)] -=
+              applied * batch.TWn_a_x[lane];
+          body_state.wy[static_cast<std::size_t>(slot_a)] -=
+              applied * batch.TWn_a_y[lane];
+          body_state.wz[static_cast<std::size_t>(slot_a)] -=
+              applied * batch.TWn_a_z[lane];
+          body_state.wx[static_cast<std::size_t>(slot_b)] +=
+              applied * batch.TWn_b_x[lane];
+          body_state.wy[static_cast<std::size_t>(slot_b)] +=
+              applied * batch.TWn_b_y[lane];
+          body_state.wz[static_cast<std::size_t>(slot_b)] +=
+              applied * batch.TWn_b_z[lane];
 
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+          batch.dvx[lane] = body_state.vx[static_cast<std::size_t>(slot_b)] -
+                            body_state.vx[static_cast<std::size_t>(slot_a)];
+          batch.dvy[lane] = body_state.vy[static_cast<std::size_t>(slot_b)] -
+                            body_state.vy[static_cast<std::size_t>(slot_a)];
+          batch.dvz[lane] = body_state.vz[static_cast<std::size_t>(slot_b)] -
+                            body_state.vz[static_cast<std::size_t>(slot_a)];
+          batch.wAx[lane] = body_state.wx[static_cast<std::size_t>(slot_a)];
+          batch.wAy[lane] = body_state.wy[static_cast<std::size_t>(slot_a)];
+          batch.wAz[lane] = body_state.wz[static_cast<std::size_t>(slot_a)];
+          batch.wBx[lane] = body_state.wx[static_cast<std::size_t>(slot_b)];
+          batch.wBy[lane] = body_state.wy[static_cast<std::size_t>(slot_b)];
+          batch.wBz[lane] = body_state.wz[static_cast<std::size_t>(slot_b)];
         } else {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+          const int slot_a = batch.bodyA_slot[lane];
+          const int slot_b = batch.bodyB_slot[lane];
+          batch.dvx[lane] = body_state.vx[static_cast<std::size_t>(slot_b)] -
+                            body_state.vx[static_cast<std::size_t>(slot_a)];
+          batch.dvy[lane] = body_state.vy[static_cast<std::size_t>(slot_b)] -
+                            body_state.vy[static_cast<std::size_t>(slot_a)];
+          batch.dvz[lane] = body_state.vz[static_cast<std::size_t>(slot_b)] -
+                            body_state.vz[static_cast<std::size_t>(slot_a)];
+          batch.wAx[lane] = body_state.wx[static_cast<std::size_t>(slot_a)];
+          batch.wAy[lane] = body_state.wy[static_cast<std::size_t>(slot_a)];
+          batch.wAz[lane] = body_state.wz[static_cast<std::size_t>(slot_a)];
+          batch.wBx[lane] = body_state.wx[static_cast<std::size_t>(slot_b)];
+          batch.wBy[lane] = body_state.wy[static_cast<std::size_t>(slot_b)];
+          batch.wBz[lane] = body_state.wz[static_cast<std::size_t>(slot_b)];
         }
       }
 
@@ -892,35 +910,50 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
             const double required_jn = jt_mag / mu;
             const double delta_needed = required_jn - batch.jn_new[lane];
             if (delta_needed > math::kEps) {
-              const int ia = batch.bodyA_index[lane];
-              const int ib = batch.bodyB_index[lane];
+              const int slot_a = batch.bodyA_slot[lane];
+              const int slot_b = batch.bodyB_slot[lane];
               const double impulse_x = delta_needed * batch.nx[lane];
               const double impulse_y = delta_needed * batch.ny[lane];
               const double impulse_z = delta_needed * batch.nz[lane];
 
-              body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-              body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-              body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-              body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-              body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-              body_state.vz[ib] += impulse_z * batch.invMassB[lane];
+              body_state.vx[static_cast<std::size_t>(slot_a)] -=
+                  impulse_x * batch.invMassA[lane];
+              body_state.vy[static_cast<std::size_t>(slot_a)] -=
+                  impulse_y * batch.invMassA[lane];
+              body_state.vz[static_cast<std::size_t>(slot_a)] -=
+                  impulse_z * batch.invMassA[lane];
+              body_state.vx[static_cast<std::size_t>(slot_b)] +=
+                  impulse_x * batch.invMassB[lane];
+              body_state.vy[static_cast<std::size_t>(slot_b)] +=
+                  impulse_y * batch.invMassB[lane];
+              body_state.vz[static_cast<std::size_t>(slot_b)] +=
+                  impulse_z * batch.invMassB[lane];
 
-              body_state.wx[ia] -= delta_needed * batch.TWn_a_x[lane];
-              body_state.wy[ia] -= delta_needed * batch.TWn_a_y[lane];
-              body_state.wz[ia] -= delta_needed * batch.TWn_a_z[lane];
-              body_state.wx[ib] += delta_needed * batch.TWn_b_x[lane];
-              body_state.wy[ib] += delta_needed * batch.TWn_b_y[lane];
-              body_state.wz[ib] += delta_needed * batch.TWn_b_z[lane];
+              body_state.wx[static_cast<std::size_t>(slot_a)] -=
+                  delta_needed * batch.TWn_a_x[lane];
+              body_state.wy[static_cast<std::size_t>(slot_a)] -=
+                  delta_needed * batch.TWn_a_y[lane];
+              body_state.wz[static_cast<std::size_t>(slot_a)] -=
+                  delta_needed * batch.TWn_a_z[lane];
+              body_state.wx[static_cast<std::size_t>(slot_b)] +=
+                  delta_needed * batch.TWn_b_x[lane];
+              body_state.wy[static_cast<std::size_t>(slot_b)] +=
+                  delta_needed * batch.TWn_b_y[lane];
+              body_state.wz[static_cast<std::size_t>(slot_b)] +=
+                  delta_needed * batch.TWn_b_z[lane];
 
-              batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-              batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-              batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-              batch.wAx[lane] = body_state.wx[ia];
-              batch.wAy[lane] = body_state.wy[ia];
-              batch.wAz[lane] = body_state.wz[ia];
-              batch.wBx[lane] = body_state.wx[ib];
-              batch.wBy[lane] = body_state.wy[ib];
-              batch.wBz[lane] = body_state.wz[ib];
+              batch.dvx[lane] = body_state.vx[static_cast<std::size_t>(slot_b)] -
+                                body_state.vx[static_cast<std::size_t>(slot_a)];
+              batch.dvy[lane] = body_state.vy[static_cast<std::size_t>(slot_b)] -
+                                body_state.vy[static_cast<std::size_t>(slot_a)];
+              batch.dvz[lane] = body_state.vz[static_cast<std::size_t>(slot_b)] -
+                                body_state.vz[static_cast<std::size_t>(slot_a)];
+              batch.wAx[lane] = body_state.wx[static_cast<std::size_t>(slot_a)];
+              batch.wAy[lane] = body_state.wy[static_cast<std::size_t>(slot_a)];
+              batch.wAz[lane] = body_state.wz[static_cast<std::size_t>(slot_a)];
+              batch.wBx[lane] = body_state.wx[static_cast<std::size_t>(slot_b)];
+              batch.wBy[lane] = body_state.wy[static_cast<std::size_t>(slot_b)];
+              batch.wBz[lane] = body_state.wz[static_cast<std::size_t>(slot_b)];
 
               batch.jn_new[lane] = required_jn;
               batch.jn[lane] = required_jn;
@@ -950,8 +983,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
         if (std::fabs(delta_jt1) > math::kEps ||
             std::fabs(delta_jt2) > math::kEps) {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
+          const int slot_a = batch.bodyA_slot[lane];
+          const int slot_b = batch.bodyB_slot[lane];
 
           const double impulse_x = delta_jt1 * batch.t1x[lane] +
                                    delta_jt2 * batch.t2x[lane];
@@ -960,35 +993,50 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_z = delta_jt1 * batch.t1z[lane] +
                                    delta_jt2 * batch.t2z[lane];
 
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
+          body_state.vx[static_cast<std::size_t>(slot_a)] -=
+              impulse_x * batch.invMassA[lane];
+          body_state.vy[static_cast<std::size_t>(slot_a)] -=
+              impulse_y * batch.invMassA[lane];
+          body_state.vz[static_cast<std::size_t>(slot_a)] -=
+              impulse_z * batch.invMassA[lane];
+          body_state.vx[static_cast<std::size_t>(slot_b)] +=
+              impulse_x * batch.invMassB[lane];
+          body_state.vy[static_cast<std::size_t>(slot_b)] +=
+              impulse_y * batch.invMassB[lane];
+          body_state.vz[static_cast<std::size_t>(slot_b)] +=
+              impulse_z * batch.invMassB[lane];
 
-          body_state.wx[ia] -= delta_jt1 * batch.TWt1_a_x[lane] +
-                               delta_jt2 * batch.TWt2_a_x[lane];
-          body_state.wy[ia] -= delta_jt1 * batch.TWt1_a_y[lane] +
-                               delta_jt2 * batch.TWt2_a_y[lane];
-          body_state.wz[ia] -= delta_jt1 * batch.TWt1_a_z[lane] +
-                               delta_jt2 * batch.TWt2_a_z[lane];
-          body_state.wx[ib] += delta_jt1 * batch.TWt1_b_x[lane] +
-                               delta_jt2 * batch.TWt2_b_x[lane];
-          body_state.wy[ib] += delta_jt1 * batch.TWt1_b_y[lane] +
-                               delta_jt2 * batch.TWt2_b_y[lane];
-          body_state.wz[ib] += delta_jt1 * batch.TWt1_b_z[lane] +
-                               delta_jt2 * batch.TWt2_b_z[lane];
+          body_state.wx[static_cast<std::size_t>(slot_a)] -=
+              delta_jt1 * batch.TWt1_a_x[lane] +
+              delta_jt2 * batch.TWt2_a_x[lane];
+          body_state.wy[static_cast<std::size_t>(slot_a)] -=
+              delta_jt1 * batch.TWt1_a_y[lane] +
+              delta_jt2 * batch.TWt2_a_y[lane];
+          body_state.wz[static_cast<std::size_t>(slot_a)] -=
+              delta_jt1 * batch.TWt1_a_z[lane] +
+              delta_jt2 * batch.TWt2_a_z[lane];
+          body_state.wx[static_cast<std::size_t>(slot_b)] +=
+              delta_jt1 * batch.TWt1_b_x[lane] +
+              delta_jt2 * batch.TWt2_b_x[lane];
+          body_state.wy[static_cast<std::size_t>(slot_b)] +=
+              delta_jt1 * batch.TWt1_b_y[lane] +
+              delta_jt2 * batch.TWt2_b_y[lane];
+          body_state.wz[static_cast<std::size_t>(slot_b)] +=
+              delta_jt1 * batch.TWt1_b_z[lane] +
+              delta_jt2 * batch.TWt2_b_z[lane];
 
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+          batch.dvx[lane] = body_state.vx[static_cast<std::size_t>(slot_b)] -
+                            body_state.vx[static_cast<std::size_t>(slot_a)];
+          batch.dvy[lane] = body_state.vy[static_cast<std::size_t>(slot_b)] -
+                            body_state.vy[static_cast<std::size_t>(slot_a)];
+          batch.dvz[lane] = body_state.vz[static_cast<std::size_t>(slot_b)] -
+                            body_state.vz[static_cast<std::size_t>(slot_a)];
+          batch.wAx[lane] = body_state.wx[static_cast<std::size_t>(slot_a)];
+          batch.wAy[lane] = body_state.wy[static_cast<std::size_t>(slot_a)];
+          batch.wAz[lane] = body_state.wz[static_cast<std::size_t>(slot_a)];
+          batch.wBx[lane] = body_state.wx[static_cast<std::size_t>(slot_b)];
+          batch.wBy[lane] = body_state.wy[static_cast<std::size_t>(slot_b)];
+          batch.wBz[lane] = body_state.wz[static_cast<std::size_t>(slot_b)];
         }
       }
     }
