@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <vector>
 
 #if defined(ADMC_USE_AVX2)
 #include <immintrin.h>
@@ -25,6 +26,61 @@ constexpr double kStaticFrictionSpeedThreshold = 0.1;
 
 double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
   return DurationMs(end - begin).count();
+}
+
+struct BodySoA {
+  std::vector<double> vx;
+  std::vector<double> vy;
+  std::vector<double> vz;
+  std::vector<double> wx;
+  std::vector<double> wy;
+  std::vector<double> wz;
+
+  explicit BodySoA(std::size_t count)
+      : vx(count, 0.0),
+        vy(count, 0.0),
+        vz(count, 0.0),
+        wx(count, 0.0),
+        wy(count, 0.0),
+        wz(count, 0.0) {}
+
+  void load_from(const std::vector<RigidBody>& bodies) {
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+      vx[i] = bodies[i].v.x;
+      vy[i] = bodies[i].v.y;
+      vz[i] = bodies[i].v.z;
+      wx[i] = bodies[i].w.x;
+      wy[i] = bodies[i].w.y;
+      wz[i] = bodies[i].w.z;
+    }
+  }
+
+  void store_to(std::vector<RigidBody>& bodies) const {
+    for (std::size_t i = 0; i < bodies.size(); ++i) {
+      bodies[i].v.x = vx[i];
+      bodies[i].v.y = vy[i];
+      bodies[i].v.z = vz[i];
+      bodies[i].w.x = wx[i];
+      bodies[i].w.y = wy[i];
+      bodies[i].w.z = wz[i];
+    }
+  }
+};
+
+inline void apply_impulse_to_body(const RigidBody& body,
+                                  BodySoA& state,
+                                  int index,
+                                  const Vec3& impulse,
+                                  const Vec3& r) {
+  state.vx[static_cast<std::size_t>(index)] += impulse.x * body.invMass;
+  state.vy[static_cast<std::size_t>(index)] += impulse.y * body.invMass;
+  state.vz[static_cast<std::size_t>(index)] += impulse.z * body.invMass;
+
+  const Vec3 torque = math::cross(r, impulse);
+  const Vec3 delta_w = body.invInertiaWorld * torque;
+  state.wx[static_cast<std::size_t>(index)] += delta_w.x;
+  state.wy[static_cast<std::size_t>(index)] += delta_w.y;
+  state.wz[static_cast<std::size_t>(index)] += delta_w.z;
 }
 
 #if defined(ADMC_USE_AVX2)
@@ -249,6 +305,13 @@ void apply_impulses_batch(std::vector<RigidBody>& bodies,
 namespace {
 
 struct ContactBatch {
+  int lanes = 0;
+  int start = 0;
+  int bodyA_index[soa::kLane] = {};
+  int bodyB_index[soa::kLane] = {};
+  double invMassA[soa::kLane] = {};
+  double invMassB[soa::kLane] = {};
+  bool lane_valid[soa::kLane] = {};
   alignas(32) double nx[soa::kLane] = {};
   alignas(32) double ny[soa::kLane] = {};
   alignas(32) double nz[soa::kLane] = {};
@@ -337,6 +400,9 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
     body.syncDerived();
   }
 
+  BodySoA body_state(bodies.size());
+  body_state.load_from(bodies);
+
   const auto warmstart_begin = Clock::now();
   if (!params.warm_start) {
     const std::size_t contact_count = rows.size();
@@ -356,8 +422,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         continue;
       }
 
-      RigidBody& A = bodies[ia];
-      RigidBody& B = bodies[ib];
+      const RigidBody& A = bodies[ia];
+      const RigidBody& B = bodies[ib];
 
       const double jn = rows.jn[i];
       const double jt1 = rows.jt1[i];
@@ -379,12 +445,12 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       const double impulse_z = rows.nz[i] * jn + rows.t1z[i] * jt1 +
                                rows.t2z[i] * jt2;
 
-      A.v.x -= impulse_x * A.invMass;
-      A.v.y -= impulse_y * A.invMass;
-      A.v.z -= impulse_z * A.invMass;
-      B.v.x += impulse_x * B.invMass;
-      B.v.y += impulse_y * B.invMass;
-      B.v.z += impulse_z * B.invMass;
+      body_state.vx[ia] -= impulse_x * A.invMass;
+      body_state.vy[ia] -= impulse_y * A.invMass;
+      body_state.vz[ia] -= impulse_z * A.invMass;
+      body_state.vx[ib] += impulse_x * B.invMass;
+      body_state.vy[ib] += impulse_y * B.invMass;
+      body_state.vz[ib] += impulse_z * B.invMass;
 
       const double dw_ax = jn * rows.TWn_a_x[i] + jt1 * rows.TWt1_a_x[i] +
                            jt2 * rows.TWt2_a_x[i];
@@ -399,12 +465,12 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       const double dw_bz = jn * rows.TWn_b_z[i] + jt1 * rows.TWt1_b_z[i] +
                            jt2 * rows.TWt2_b_z[i];
 
-      A.w.x -= dw_ax;
-      A.w.y -= dw_ay;
-      A.w.z -= dw_az;
-      B.w.x += dw_bx;
-      B.w.y += dw_by;
-      B.w.z += dw_bz;
+      body_state.wx[ia] -= dw_ax;
+      body_state.wy[ia] -= dw_ay;
+      body_state.wz[ia] -= dw_az;
+      body_state.wx[ib] += dw_bx;
+      body_state.wy[ib] += dw_by;
+      body_state.wz[ib] += dw_bz;
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -426,11 +492,11 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         ++debug_info->warmstart_joint_impulses;
       }
 
-      RigidBody& A = bodies[ia];
-      RigidBody& B = bodies[ib];
+      const RigidBody& A = bodies[ia];
+      const RigidBody& B = bodies[ib];
       const Vec3 impulse = joints.d[i] * joints.j[i];
-      A.applyImpulse(-impulse, joints.ra[i]);
-      B.applyImpulse(impulse, joints.rb[i]);
+      apply_impulse_to_body(A, body_state, ia, -impulse, joints.ra[i]);
+      apply_impulse_to_body(B, body_state, ib, impulse, joints.rb[i]);
     }
   }
 
@@ -440,68 +506,15 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         elapsed_ms(warmstart_begin, warmstart_end);
   }
 
-  ContactBatch batch;
-
-  auto solve_joint_iteration_scalar = [&](std::size_t i) {
-    const int ia = joints.a[i];
-    const int ib = joints.b[i];
-    if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
-        ib >= static_cast<int>(bodies.size())) {
-      if (debug_info) {
-        ++debug_info->invalid_joint_indices;
-      }
-      return;
-    }
-
-    const bool active = (params.beta > math::kEps) ||
-                        (joints.beta[i] > math::kEps) ||
-                        (joints.gamma[i] > math::kEps);
-    if (!active) {
-      return;
-    }
-
-    const double denom = joints.k[i] + joints.gamma[i];
-    if (denom <= math::kEps) {
-      if (debug_info) {
-        ++debug_info->singular_joint_denominators;
-      }
-      return;
-    }
-
-    RigidBody& A = bodies[ia];
-    RigidBody& B = bodies[ib];
-    const Vec3 va = A.v + math::cross(A.w, joints.ra[i]);
-    const Vec3 vb = B.v + math::cross(B.w, joints.rb[i]);
-    const double v_rel_d = math::dot(joints.d[i], vb - va);
-
-    double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
-    if (joints.rope[i] && j_new < 0.0) {
-      if (debug_info) {
-        ++debug_info->rope_clamps;
-      }
-      j_new = 0.0;
-    }
-
-    const double applied = j_new - joints.j[i];
-    joints.j[i] = j_new;
-
-    if (std::fabs(applied) > math::kEps) {
-      const Vec3 impulse = applied * joints.d[i];
-      A.applyImpulse(-impulse, joints.ra[i]);
-      B.applyImpulse(impulse, joints.rb[i]);
-    }
-  };
-
-  const auto iteration_begin = Clock::now();
-  for (int it = 0; it < iterations; ++it) {
+  std::vector<ContactBatch> contact_batches;
+  if (rows.N > 0) {
+    const int num_batches = (rows.N + soa::kLane - 1) / soa::kLane;
+    contact_batches.reserve(static_cast<std::size_t>(num_batches));
     for (int start = 0; start < rows.N; start += soa::kLane) {
+      ContactBatch batch;
       const int lanes = std::min(soa::kLane, rows.N - start);
-
-      bool lane_valid[soa::kLane] = {};
-      RigidBody* bodyA[soa::kLane] = {};
-      RigidBody* bodyB[soa::kLane] = {};
-      double invMassA[soa::kLane] = {};
-      double invMassB[soa::kLane] = {};
+      batch.lanes = lanes;
+      batch.start = start;
 
       soa::load4d_masked(rows.nx.data() + start, batch.nx, lanes);
       soa::load4d_masked(rows.ny.data() + start, batch.ny, lanes);
@@ -563,6 +576,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         const int ia = rows.a[idx];
         const int ib = rows.b[idx];
 
+        batch.bodyA_index[lane] = ia;
+        batch.bodyB_index[lane] = ib;
         if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
             ib >= static_cast<int>(bodies.size())) {
           if (debug_info) {
@@ -574,26 +589,106 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           batch.inv_k_t2[lane] = 0.0;
           batch.bias[lane] = 0.0;
           batch.bounce[lane] = 0.0;
-          lane_valid[lane] = false;
+          batch.lane_valid[lane] = false;
           continue;
         }
 
-        lane_valid[lane] = true;
-        bodyA[lane] = &bodies[ia];
-        bodyB[lane] = &bodies[ib];
-        invMassA[lane] = bodies[ia].invMass;
-        invMassB[lane] = bodies[ib].invMass;
+        batch.lane_valid[lane] = true;
+        batch.invMassA[lane] = bodies[ia].invMass;
+        batch.invMassB[lane] = bodies[ib].invMass;
+      }
 
-        batch.dvx[lane] = bodies[ib].v.x - bodies[ia].v.x;
-        batch.dvy[lane] = bodies[ib].v.y - bodies[ia].v.y;
-        batch.dvz[lane] = bodies[ib].v.z - bodies[ia].v.z;
+      contact_batches.push_back(batch);
+    }
+  }
 
-        batch.wAx[lane] = bodies[ia].w.x;
-        batch.wAy[lane] = bodies[ia].w.y;
-        batch.wAz[lane] = bodies[ia].w.z;
-        batch.wBx[lane] = bodies[ib].w.x;
-        batch.wBy[lane] = bodies[ib].w.y;
-        batch.wBz[lane] = bodies[ib].w.z;
+  auto solve_joint_iteration_scalar = [&](std::size_t i) {
+    const int ia = joints.a[i];
+    const int ib = joints.b[i];
+    if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
+        ib >= static_cast<int>(bodies.size())) {
+      if (debug_info) {
+        ++debug_info->invalid_joint_indices;
+      }
+      return;
+    }
+
+    const bool active = (params.beta > math::kEps) ||
+                        (joints.beta[i] > math::kEps) ||
+                        (joints.gamma[i] > math::kEps);
+    if (!active) {
+      return;
+    }
+
+    const double denom = joints.k[i] + joints.gamma[i];
+    if (denom <= math::kEps) {
+      if (debug_info) {
+        ++debug_info->singular_joint_denominators;
+      }
+      return;
+    }
+
+    const RigidBody& A = bodies[ia];
+    const RigidBody& B = bodies[ib];
+    const Vec3 va(body_state.vx[ia], body_state.vy[ia], body_state.vz[ia]);
+    const Vec3 wa(body_state.wx[ia], body_state.wy[ia], body_state.wz[ia]);
+    const Vec3 vb(body_state.vx[ib], body_state.vy[ib], body_state.vz[ib]);
+    const Vec3 wb(body_state.wx[ib], body_state.wy[ib], body_state.wz[ib]);
+    const Vec3 va_world = va + math::cross(wa, joints.ra[i]);
+    const Vec3 vb_world = vb + math::cross(wb, joints.rb[i]);
+    const double v_rel_d = math::dot(joints.d[i], vb_world - va_world);
+
+    double j_new = joints.j[i] - (v_rel_d + joints.bias[i]) / denom;
+    if (joints.rope[i] && j_new < 0.0) {
+      if (debug_info) {
+        ++debug_info->rope_clamps;
+      }
+      j_new = 0.0;
+    }
+
+    const double applied = j_new - joints.j[i];
+    joints.j[i] = j_new;
+
+    if (std::fabs(applied) > math::kEps) {
+      const Vec3 impulse = applied * joints.d[i];
+      apply_impulse_to_body(A, body_state, ia, -impulse, joints.ra[i]);
+      apply_impulse_to_body(B, body_state, ib, impulse, joints.rb[i]);
+    }
+  };
+
+  const auto iteration_begin = Clock::now();
+  for (int it = 0; it < iterations; ++it) {
+    for (ContactBatch& batch : contact_batches) {
+      const int lanes = batch.lanes;
+      if (lanes <= 0) {
+        continue;
+      }
+
+      for (int lane = 0; lane < lanes; ++lane) {
+        if (!batch.lane_valid[lane]) {
+          batch.dvx[lane] = 0.0;
+          batch.dvy[lane] = 0.0;
+          batch.dvz[lane] = 0.0;
+          batch.wAx[lane] = 0.0;
+          batch.wAy[lane] = 0.0;
+          batch.wAz[lane] = 0.0;
+          batch.wBx[lane] = 0.0;
+          batch.wBy[lane] = 0.0;
+          batch.wBz[lane] = 0.0;
+          continue;
+        }
+
+        const int ia = batch.bodyA_index[lane];
+        const int ib = batch.bodyB_index[lane];
+        batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
+        batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
+        batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
+        batch.wAx[lane] = body_state.wx[ia];
+        batch.wAy[lane] = body_state.wy[ia];
+        batch.wAz[lane] = body_state.wz[ia];
+        batch.wBx[lane] = body_state.wx[ib];
+        batch.wBy[lane] = body_state.wy[ib];
+        batch.wBz[lane] = body_state.wz[ib];
       }
 
       VecD dvx_v = VecD::load(batch.dvx);
@@ -638,8 +733,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       jn_clamped_v.store(batch.jn_new);
 
       for (int lane = 0; lane < lanes; ++lane) {
-        const int idx = start + lane;
-        if (!lane_valid[lane]) {
+        const int idx = batch.start + lane;
+        if (!batch.lane_valid[lane]) {
           rows.jn[idx] = 0.0;
           rows.jt1[idx] = 0.0;
           rows.jt2[idx] = 0.0;
@@ -663,42 +758,43 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_x = applied * batch.nx[lane];
           const double impulse_y = applied * batch.ny[lane];
           const double impulse_z = applied * batch.nz[lane];
-          RigidBody& A = *bodyA[lane];
-          RigidBody& B = *bodyB[lane];
+          const int ia = batch.bodyA_index[lane];
+          const int ib = batch.bodyB_index[lane];
+          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
+          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
+          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
+          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
+          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
+          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
 
-          A.v.x -= impulse_x * invMassA[lane];
-          A.v.y -= impulse_y * invMassA[lane];
-          A.v.z -= impulse_z * invMassA[lane];
-          B.v.x += impulse_x * invMassB[lane];
-          B.v.y += impulse_y * invMassB[lane];
-          B.v.z += impulse_z * invMassB[lane];
+          body_state.wx[ia] -= applied * batch.TWn_a_x[lane];
+          body_state.wy[ia] -= applied * batch.TWn_a_y[lane];
+          body_state.wz[ia] -= applied * batch.TWn_a_z[lane];
+          body_state.wx[ib] += applied * batch.TWn_b_x[lane];
+          body_state.wy[ib] += applied * batch.TWn_b_y[lane];
+          body_state.wz[ib] += applied * batch.TWn_b_z[lane];
 
-          A.w.x -= applied * batch.TWn_a_x[lane];
-          A.w.y -= applied * batch.TWn_a_y[lane];
-          A.w.z -= applied * batch.TWn_a_z[lane];
-          B.w.x += applied * batch.TWn_b_x[lane];
-          B.w.y += applied * batch.TWn_b_y[lane];
-          B.w.z += applied * batch.TWn_b_z[lane];
-
-          batch.dvx[lane] = B.v.x - A.v.x;
-          batch.dvy[lane] = B.v.y - A.v.y;
-          batch.dvz[lane] = B.v.z - A.v.z;
-          batch.wAx[lane] = A.w.x;
-          batch.wAy[lane] = A.w.y;
-          batch.wAz[lane] = A.w.z;
-          batch.wBx[lane] = B.w.x;
-          batch.wBy[lane] = B.w.y;
-          batch.wBz[lane] = B.w.z;
+          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
+          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
+          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
+          batch.wAx[lane] = body_state.wx[ia];
+          batch.wAy[lane] = body_state.wy[ia];
+          batch.wAz[lane] = body_state.wz[ia];
+          batch.wBx[lane] = body_state.wx[ib];
+          batch.wBy[lane] = body_state.wy[ib];
+          batch.wBz[lane] = body_state.wz[ib];
         } else {
-          batch.dvx[lane] = bodyB[lane]->v.x - bodyA[lane]->v.x;
-          batch.dvy[lane] = bodyB[lane]->v.y - bodyA[lane]->v.y;
-          batch.dvz[lane] = bodyB[lane]->v.z - bodyA[lane]->v.z;
-          batch.wAx[lane] = bodyA[lane]->w.x;
-          batch.wAy[lane] = bodyA[lane]->w.y;
-          batch.wAz[lane] = bodyA[lane]->w.z;
-          batch.wBx[lane] = bodyB[lane]->w.x;
-          batch.wBy[lane] = bodyB[lane]->w.y;
-          batch.wBz[lane] = bodyB[lane]->w.z;
+          const int ia = batch.bodyA_index[lane];
+          const int ib = batch.bodyB_index[lane];
+          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
+          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
+          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
+          batch.wAx[lane] = body_state.wx[ia];
+          batch.wAy[lane] = body_state.wy[ia];
+          batch.wAz[lane] = body_state.wz[ia];
+          batch.wBx[lane] = body_state.wx[ib];
+          batch.wBy[lane] = body_state.wy[ib];
+          batch.wBz[lane] = body_state.wz[ib];
         }
       }
 
@@ -756,8 +852,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       v_rel_t2_v.store(batch.v_rel_t2);
 
       for (int lane = 0; lane < lanes; ++lane) {
-        const int idx = start + lane;
-        if (!lane_valid[lane]) {
+        const int idx = batch.start + lane;
+        if (!batch.lane_valid[lane]) {
           rows.jt1[idx] = 0.0;
           rows.jt2[idx] = 0.0;
           batch.jt1[lane] = 0.0;
@@ -796,35 +892,35 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
             const double required_jn = jt_mag / mu;
             const double delta_needed = required_jn - batch.jn_new[lane];
             if (delta_needed > math::kEps) {
-              RigidBody& A = *bodyA[lane];
-              RigidBody& B = *bodyB[lane];
+              const int ia = batch.bodyA_index[lane];
+              const int ib = batch.bodyB_index[lane];
               const double impulse_x = delta_needed * batch.nx[lane];
               const double impulse_y = delta_needed * batch.ny[lane];
               const double impulse_z = delta_needed * batch.nz[lane];
 
-              A.v.x -= impulse_x * invMassA[lane];
-              A.v.y -= impulse_y * invMassA[lane];
-              A.v.z -= impulse_z * invMassA[lane];
-              B.v.x += impulse_x * invMassB[lane];
-              B.v.y += impulse_y * invMassB[lane];
-              B.v.z += impulse_z * invMassB[lane];
+              body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
+              body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
+              body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
+              body_state.vx[ib] += impulse_x * batch.invMassB[lane];
+              body_state.vy[ib] += impulse_y * batch.invMassB[lane];
+              body_state.vz[ib] += impulse_z * batch.invMassB[lane];
 
-              A.w.x -= delta_needed * batch.TWn_a_x[lane];
-              A.w.y -= delta_needed * batch.TWn_a_y[lane];
-              A.w.z -= delta_needed * batch.TWn_a_z[lane];
-              B.w.x += delta_needed * batch.TWn_b_x[lane];
-              B.w.y += delta_needed * batch.TWn_b_y[lane];
-              B.w.z += delta_needed * batch.TWn_b_z[lane];
+              body_state.wx[ia] -= delta_needed * batch.TWn_a_x[lane];
+              body_state.wy[ia] -= delta_needed * batch.TWn_a_y[lane];
+              body_state.wz[ia] -= delta_needed * batch.TWn_a_z[lane];
+              body_state.wx[ib] += delta_needed * batch.TWn_b_x[lane];
+              body_state.wy[ib] += delta_needed * batch.TWn_b_y[lane];
+              body_state.wz[ib] += delta_needed * batch.TWn_b_z[lane];
 
-              batch.dvx[lane] = B.v.x - A.v.x;
-              batch.dvy[lane] = B.v.y - A.v.y;
-              batch.dvz[lane] = B.v.z - A.v.z;
-              batch.wAx[lane] = A.w.x;
-              batch.wAy[lane] = A.w.y;
-              batch.wAz[lane] = A.w.z;
-              batch.wBx[lane] = B.w.x;
-              batch.wBy[lane] = B.w.y;
-              batch.wBz[lane] = B.w.z;
+              batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
+              batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
+              batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
+              batch.wAx[lane] = body_state.wx[ia];
+              batch.wAy[lane] = body_state.wy[ia];
+              batch.wAz[lane] = body_state.wz[ia];
+              batch.wBx[lane] = body_state.wx[ib];
+              batch.wBy[lane] = body_state.wy[ib];
+              batch.wBz[lane] = body_state.wz[ib];
 
               batch.jn_new[lane] = required_jn;
               batch.jn[lane] = required_jn;
@@ -854,8 +950,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
         if (std::fabs(delta_jt1) > math::kEps ||
             std::fabs(delta_jt2) > math::kEps) {
-          RigidBody& A = *bodyA[lane];
-          RigidBody& B = *bodyB[lane];
+          const int ia = batch.bodyA_index[lane];
+          const int ib = batch.bodyB_index[lane];
 
           const double impulse_x = delta_jt1 * batch.t1x[lane] +
                                    delta_jt2 * batch.t2x[lane];
@@ -864,25 +960,35 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
           const double impulse_z = delta_jt1 * batch.t1z[lane] +
                                    delta_jt2 * batch.t2z[lane];
 
-          A.v.x -= impulse_x * invMassA[lane];
-          A.v.y -= impulse_y * invMassA[lane];
-          A.v.z -= impulse_z * invMassA[lane];
-          B.v.x += impulse_x * invMassB[lane];
-          B.v.y += impulse_y * invMassB[lane];
-          B.v.z += impulse_z * invMassB[lane];
+          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
+          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
+          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
+          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
+          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
+          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
 
-          A.w.x -= delta_jt1 * batch.TWt1_a_x[lane] +
-                   delta_jt2 * batch.TWt2_a_x[lane];
-          A.w.y -= delta_jt1 * batch.TWt1_a_y[lane] +
-                   delta_jt2 * batch.TWt2_a_y[lane];
-          A.w.z -= delta_jt1 * batch.TWt1_a_z[lane] +
-                   delta_jt2 * batch.TWt2_a_z[lane];
-          B.w.x += delta_jt1 * batch.TWt1_b_x[lane] +
-                   delta_jt2 * batch.TWt2_b_x[lane];
-          B.w.y += delta_jt1 * batch.TWt1_b_y[lane] +
-                   delta_jt2 * batch.TWt2_b_y[lane];
-          B.w.z += delta_jt1 * batch.TWt1_b_z[lane] +
-                   delta_jt2 * batch.TWt2_b_z[lane];
+          body_state.wx[ia] -= delta_jt1 * batch.TWt1_a_x[lane] +
+                               delta_jt2 * batch.TWt2_a_x[lane];
+          body_state.wy[ia] -= delta_jt1 * batch.TWt1_a_y[lane] +
+                               delta_jt2 * batch.TWt2_a_y[lane];
+          body_state.wz[ia] -= delta_jt1 * batch.TWt1_a_z[lane] +
+                               delta_jt2 * batch.TWt2_a_z[lane];
+          body_state.wx[ib] += delta_jt1 * batch.TWt1_b_x[lane] +
+                               delta_jt2 * batch.TWt2_b_x[lane];
+          body_state.wy[ib] += delta_jt1 * batch.TWt1_b_y[lane] +
+                               delta_jt2 * batch.TWt2_b_y[lane];
+          body_state.wz[ib] += delta_jt1 * batch.TWt1_b_z[lane] +
+                               delta_jt2 * batch.TWt2_b_z[lane];
+
+          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
+          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
+          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
+          batch.wAx[lane] = body_state.wx[ia];
+          batch.wAy[lane] = body_state.wy[ia];
+          batch.wAz[lane] = body_state.wz[ia];
+          batch.wBx[lane] = body_state.wx[ib];
+          batch.wBy[lane] = body_state.wy[ib];
+          batch.wBz[lane] = body_state.wz[ib];
         }
       }
     }
@@ -982,6 +1088,8 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
     debug_info->timings.solver_iterations_ms +=
         elapsed_ms(iteration_begin, iteration_end);
   }
+
+  body_state.store_to(bodies);
 
   for (std::size_t i = 0; i < rows.size(); ++i) {
     const int idx = rows.indices[i];
