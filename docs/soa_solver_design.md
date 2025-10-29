@@ -131,20 +131,20 @@ Focus on the **fully SoA-native Gauss-Seidel** blueprint above: move body state 
 
 ## Integration & Modularization Strategy
 
-### Ship as a Fourth Solver First
+### Ship as the Vectorized Solver First
 - **Risk isolation:** Standing up the SoA kernel as a distinct `SolverType::SoA` keeps the well-tuned AoS, reduced, and split-Jacobi solvers untouched while the SoA path matures. Flip-by-scene or flip-by-platform switches can enable focused testing without regressing the shipping path.
 - **Instrumentation parity:** A dedicated solver lets telemetry compare identical scenes across solver families, making perf, stability, and determinism regressions easier to spot during rollout.
 - **Feature coverage:** Existing gameplay features (contact events, CCD, sleeping) can continue using the proven solvers while the SoA path implements them incrementally behind capability checks. This avoids blocking on parity work before the SIMD kernel is ready for production.
-- **Migration story:** Once the SoA solver closes the gap, targeted subsystems (e.g., heavy contact stacks) can opt in, and we can later decide whether to retire the older solver or keep it as a low-latency fallback for tiny islands.
+- **Migration story:** Once the vectorized solver closes the gap, targeted subsystems (e.g., heavy contact stacks) can opt in, and we can later decide whether to retire the older solver or keep it as a low-latency fallback for tiny islands.
 
 ### Modularize Shared Building Blocks
 - **Contact staging module:** Factor AoS→SoA harvesting into a reusable component that both the new solver and any future hybrids can consume. This module owns contact ID management, warm-start persistence, and SIMD-friendly batch metadata.
 - **Body data services:** Encapsulate the SoA body storage (velocity, mass, inertia lanes) in a subsystem with clear APIs (`acquireBodies(batch)`, `applyImpulse(batch, delta)`) so existing solvers can continue using AoS structures while the SoA solver relies on vector-ready views.
-- **Batch scheduler:** Lift graph coloring, parity batching, and tail-mask logic into a separate scheduler layer. Expose interchangeable policies (SIMD width, conflict rules) so the fourth solver can experiment without disturbing legacy code.
+- **Batch scheduler:** Lift graph coloring, parity batching, and tail-mask logic into a separate scheduler layer. Expose interchangeable policies (SIMD width, conflict rules) so the vectorized solver can experiment without disturbing legacy code.
 - **Microkernel library:** Define narrow, header-only kernels for warm-start, normal solve, friction solve, and writeback. Each kernel operates on contiguous SoA slices and mask parameters, enabling unit tests and possible reuse by future threaded/Jacobi variants.
 
 ### Path to Consolidation
-After the fourth solver reaches feature parity and demonstrably outperforms the existing options on its target workloads, we can evaluate folding the modular pieces back together:
+After the vectorized solver reaches feature parity and demonstrably outperforms the existing options on its target workloads, we can evaluate folding the modular pieces back together:
 - Replace duplicated staging code by directing the AoS solvers to reuse the shared contact module (they can request AoS projections where needed).
 - Gradually migrate warm-start and telemetry hooks so that switching the default solver requires only a configuration change.
 - If maintenance cost becomes prohibitive, retire the old solver paths but keep the modular boundaries—future experiments (e.g., GPU or Jacobi variants) can then plug into the same staging and batching layers without a rewrite.

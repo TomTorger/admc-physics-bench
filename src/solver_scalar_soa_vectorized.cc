@@ -1,4 +1,4 @@
-#include "solver_scalar_soa_fourth.hpp"
+#include "solver_scalar_soa_vectorized.hpp"
 
 #include "solver_scalar_soa.hpp"
 
@@ -63,7 +63,7 @@ void forward_to_scalar(std::vector<RigidBody>& bodies,
                        const SoaParams& params,
                        SolverDebugInfo* debug_info) {
   // For the initial drop we simply forward to the existing scalar implementation
-  // so the fourth solver integrates with the surrounding pipeline while more
+  // so the vectorized solver integrates with the surrounding pipeline while more
   // advanced kernels are built out. Record a wall-clock duration to provide
   // consistent timing data to the benchmarking harness.
   const auto solver_begin = Clock::now();
@@ -74,22 +74,22 @@ void forward_to_scalar(std::vector<RigidBody>& bodies,
 
 }  // namespace
 
-void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
-                             std::vector<Contact>& contacts,
-                             RowSOA& rows,
-                             JointSOA& joints,
-                             const SoaParams& params,
-                             SolverDebugInfo* debug_info) {
+void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
+                                 std::vector<Contact>& contacts,
+                                 RowSOA& rows,
+                                 JointSOA& joints,
+                                 const SoaParams& params,
+                                 SolverDebugInfo* debug_info) {
   SolverDebugInfo local_info;
   forward_to_scalar(bodies, contacts, rows, joints, params,
                     debug_info ? debug_info : &local_info);
 }
 
-void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
-                             std::vector<Contact>& contacts,
-                             RowSOA& rows,
-                             const SoaParams& params,
-                             SolverDebugInfo* debug_info) {
+void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
+                                 std::vector<Contact>& contacts,
+                                 RowSOA& rows,
+                                 const SoaParams& params,
+                                 SolverDebugInfo* debug_info) {
   static JointSOA empty_joints;
   empty_joints.clear();
   SolverDebugInfo local_info;
@@ -97,12 +97,12 @@ void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
                     debug_info ? debug_info : &local_info);
 }
 
-void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
-                             std::vector<Contact>& contacts,
-                             RowSOA& rows,
-                             JointSOA& joints,
-                             const SolverParams& params,
-                             SolverDebugInfo* debug_info) {
+void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
+                                 std::vector<Contact>& contacts,
+                                 RowSOA& rows,
+                                 JointSOA& joints,
+                                 const SolverParams& params,
+                                 SolverDebugInfo* debug_info) {
   SoaParams derived;
   static_cast<SolverParams&>(derived) = params;
   SolverDebugInfo local_info;
@@ -110,12 +110,12 @@ void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
                     debug_info ? debug_info : &local_info);
 }
 
-void solve_scalar_soa_fourth(std::vector<RigidBody>& bodies,
-                             std::vector<Contact>& contacts,
-                             RowSOA& rows,
-                             const SolverParams& params,
-                             SolverDebugInfo* debug_info) {
+void solve_scalar_soa_vectorized(std::vector<RigidBody>& bodies,
+                                 std::vector<Contact>& contacts,
+                                 RowSOA& rows,
+                                 const SolverParams& params,
+                                 SolverDebugInfo* debug_info) {
   SoaParams derived;
   static_cast<SolverParams&>(derived) = params;
-  solve_scalar_soa_fourth(bodies, contacts, rows, derived, debug_info);
+  solve_scalar_soa_vectorized(bodies, contacts, rows, derived, debug_info);
 }
