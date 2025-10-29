@@ -23,6 +23,7 @@ This repo makes those trade-offs measurable across representative scenes.
 - ✅ **Baseline solver (AoS, vector-per-row)** — reference implementation.
 - ✅ **Scalar Cached solver (AoS)** — normal + friction as **scalar rows** with caching & warm-start.
 - ✅ **SoA-batched solver** — same math, **Structure-of-Arrays** for better memory/throughput.
+- ✅ **Vectorized SoA solver** — forwards through the new SIMD-friendly path for upcoming lane-specialized kernels.
 - ✅ **Deterministic scenes** — from two-body cases to particle-like clouds and stacks.
 - ✅ **Metrics** — directional-momentum drift, constraint error, energy drift, cone consistency.
 - ✅ **Benchmark harness** — Google Benchmark + CSV output under `results/`.
@@ -128,6 +129,11 @@ bash scripts/run_bench.sh
 > See: [docs/alg_scalar_normal_row_math.md](docs/alg_scalar_normal_row_math.md),
 > [docs/alg_scalar_friction_rows_math.md](docs/alg_scalar_friction_rows_math.md),
 > [docs/alg_scalar_soa_batched_math.md](docs/alg_scalar_soa_batched_math.md)
+
+### 4) Vectorized SoA solver
+
+* Shares the SoA pipeline while routing through the SIMD-friendly vectorized entrypoint.
+* Currently forwards to the scalar implementation while the dedicated kernels solidify, preserving instrumentation and timings.
 
 ---
 

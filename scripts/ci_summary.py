@@ -69,7 +69,8 @@ def _solver_order_key(name: str) -> tuple[int, str]:
         "scalar": 2,
         "soa": 2,
         "scalar_soa": 2,
-        "soa_fourth": 3,
+        "soa_vectorized": 3,
+        "scalar_soa_vectorized": 3,
     }
     for key, value in priority.items():
         if normalized == key or normalized.startswith(f"{key}_"):
