@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <vector>
+#include <cstdint>
 
 #if defined(ADMC_USE_AVX2)
 #include <immintrin.h>
@@ -27,6 +28,83 @@ constexpr double kStaticFrictionSpeedThreshold = 0.1;
 double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
   return DurationMs(end - begin).count();
 }
+
+struct ContactBatch {
+  int lanes = 0;
+  int start = 0;
+  int bodyA_index[soa::kLane] = {};
+  int bodyB_index[soa::kLane] = {};
+  double invMassA[soa::kLane] = {};
+  double invMassB[soa::kLane] = {};
+  bool lane_valid[soa::kLane] = {};
+  alignas(32) double nx[soa::kLane] = {};
+  alignas(32) double ny[soa::kLane] = {};
+  alignas(32) double nz[soa::kLane] = {};
+  alignas(32) double t1x[soa::kLane] = {};
+  alignas(32) double t1y[soa::kLane] = {};
+  alignas(32) double t1z[soa::kLane] = {};
+  alignas(32) double t2x[soa::kLane] = {};
+  alignas(32) double t2y[soa::kLane] = {};
+  alignas(32) double t2z[soa::kLane] = {};
+  alignas(32) double raxn_x[soa::kLane] = {};
+  alignas(32) double raxn_y[soa::kLane] = {};
+  alignas(32) double raxn_z[soa::kLane] = {};
+  alignas(32) double rbxn_x[soa::kLane] = {};
+  alignas(32) double rbxn_y[soa::kLane] = {};
+  alignas(32) double rbxn_z[soa::kLane] = {};
+  alignas(32) double raxt1_x[soa::kLane] = {};
+  alignas(32) double raxt1_y[soa::kLane] = {};
+  alignas(32) double raxt1_z[soa::kLane] = {};
+  alignas(32) double rbxt1_x[soa::kLane] = {};
+  alignas(32) double rbxt1_y[soa::kLane] = {};
+  alignas(32) double rbxt1_z[soa::kLane] = {};
+  alignas(32) double raxt2_x[soa::kLane] = {};
+  alignas(32) double raxt2_y[soa::kLane] = {};
+  alignas(32) double raxt2_z[soa::kLane] = {};
+  alignas(32) double rbxt2_x[soa::kLane] = {};
+  alignas(32) double rbxt2_y[soa::kLane] = {};
+  alignas(32) double rbxt2_z[soa::kLane] = {};
+  alignas(32) double TWn_a_x[soa::kLane] = {};
+  alignas(32) double TWn_a_y[soa::kLane] = {};
+  alignas(32) double TWn_a_z[soa::kLane] = {};
+  alignas(32) double TWn_b_x[soa::kLane] = {};
+  alignas(32) double TWn_b_y[soa::kLane] = {};
+  alignas(32) double TWn_b_z[soa::kLane] = {};
+  alignas(32) double TWt1_a_x[soa::kLane] = {};
+  alignas(32) double TWt1_a_y[soa::kLane] = {};
+  alignas(32) double TWt1_a_z[soa::kLane] = {};
+  alignas(32) double TWt1_b_x[soa::kLane] = {};
+  alignas(32) double TWt1_b_y[soa::kLane] = {};
+  alignas(32) double TWt1_b_z[soa::kLane] = {};
+  alignas(32) double TWt2_a_x[soa::kLane] = {};
+  alignas(32) double TWt2_a_y[soa::kLane] = {};
+  alignas(32) double TWt2_a_z[soa::kLane] = {};
+  alignas(32) double TWt2_b_x[soa::kLane] = {};
+  alignas(32) double TWt2_b_y[soa::kLane] = {};
+  alignas(32) double TWt2_b_z[soa::kLane] = {};
+  alignas(32) double inv_k_n[soa::kLane] = {};
+  alignas(32) double inv_k_t1[soa::kLane] = {};
+  alignas(32) double inv_k_t2[soa::kLane] = {};
+  alignas(32) double bias[soa::kLane] = {};
+  alignas(32) double bounce[soa::kLane] = {};
+  alignas(32) double mu[soa::kLane] = {};
+  alignas(32) double jn[soa::kLane] = {};
+  alignas(32) double jt1[soa::kLane] = {};
+  alignas(32) double jt2[soa::kLane] = {};
+  alignas(32) double jn_pre_clamp[soa::kLane] = {};
+  alignas(32) double jn_new[soa::kLane] = {};
+  alignas(32) double v_rel_t1[soa::kLane] = {};
+  alignas(32) double v_rel_t2[soa::kLane] = {};
+  alignas(32) double dvx[soa::kLane] = {};
+  alignas(32) double dvy[soa::kLane] = {};
+  alignas(32) double dvz[soa::kLane] = {};
+  alignas(32) double wAx[soa::kLane] = {};
+  alignas(32) double wAy[soa::kLane] = {};
+  alignas(32) double wAz[soa::kLane] = {};
+  alignas(32) double wBx[soa::kLane] = {};
+  alignas(32) double wBy[soa::kLane] = {};
+  alignas(32) double wBz[soa::kLane] = {};
+};
 
 struct BodySoA {
   std::vector<double> vx;
@@ -65,7 +143,216 @@ struct BodySoA {
       bodies[i].w.z = wz[i];
     }
   }
+
+  void gather_contact(const ContactBatch& batch,
+                      double* dvx_out,
+                      double* dvy_out,
+                      double* dvz_out,
+                      double* wAx_out,
+                      double* wAy_out,
+                      double* wAz_out,
+                      double* wBx_out,
+                      double* wBy_out,
+                      double* wBz_out,
+                      int lanes,
+                      std::uint32_t lane_mask) const;
+
+  void accumulate_linear(const ContactBatch& batch,
+                         const double* applied_n,
+                         const double* applied_t1,
+                         const double* applied_t2,
+                         int lanes,
+                         std::uint32_t lane_mask);
+
+  void accumulate_angular(const ContactBatch& batch,
+                          const double* applied_n,
+                          const double* applied_t1,
+                          const double* applied_t2,
+                          int lanes,
+                          std::uint32_t lane_mask);
 };
+
+void BodySoA::gather_contact(const ContactBatch& batch,
+                             double* dvx_out,
+                             double* dvy_out,
+                             double* dvz_out,
+                             double* wAx_out,
+                             double* wAy_out,
+                             double* wAz_out,
+                             double* wBx_out,
+                             double* wBy_out,
+                             double* wBz_out,
+                             int lanes,
+                             std::uint32_t lane_mask) const {
+  const std::size_t body_count = vx.size();
+  for (int lane = 0; lane < lanes; ++lane) {
+    const bool enabled = (lane_mask & (1u << lane)) != 0u;
+    if (!enabled) {
+      dvx_out[lane] = 0.0;
+      dvy_out[lane] = 0.0;
+      dvz_out[lane] = 0.0;
+      wAx_out[lane] = 0.0;
+      wAy_out[lane] = 0.0;
+      wAz_out[lane] = 0.0;
+      wBx_out[lane] = 0.0;
+      wBy_out[lane] = 0.0;
+      wBz_out[lane] = 0.0;
+      continue;
+    }
+
+    const int ia = batch.bodyA_index[lane];
+    const int ib = batch.bodyB_index[lane];
+    if (ia < 0 || ib < 0) {
+      dvx_out[lane] = 0.0;
+      dvy_out[lane] = 0.0;
+      dvz_out[lane] = 0.0;
+      wAx_out[lane] = 0.0;
+      wAy_out[lane] = 0.0;
+      wAz_out[lane] = 0.0;
+      wBx_out[lane] = 0.0;
+      wBy_out[lane] = 0.0;
+      wBz_out[lane] = 0.0;
+      continue;
+    }
+
+    const std::size_t idx_a = static_cast<std::size_t>(ia);
+    const std::size_t idx_b = static_cast<std::size_t>(ib);
+    if (idx_a >= body_count || idx_b >= body_count) {
+      dvx_out[lane] = 0.0;
+      dvy_out[lane] = 0.0;
+      dvz_out[lane] = 0.0;
+      wAx_out[lane] = 0.0;
+      wAy_out[lane] = 0.0;
+      wAz_out[lane] = 0.0;
+      wBx_out[lane] = 0.0;
+      wBy_out[lane] = 0.0;
+      wBz_out[lane] = 0.0;
+      continue;
+    }
+
+    dvx_out[lane] = vx[idx_b] - vx[idx_a];
+    dvy_out[lane] = vy[idx_b] - vy[idx_a];
+    dvz_out[lane] = vz[idx_b] - vz[idx_a];
+    wAx_out[lane] = wx[idx_a];
+    wAy_out[lane] = wy[idx_a];
+    wAz_out[lane] = wz[idx_a];
+    wBx_out[lane] = wx[idx_b];
+    wBy_out[lane] = wy[idx_b];
+    wBz_out[lane] = wz[idx_b];
+  }
+
+  for (int lane = lanes; lane < soa::kLane; ++lane) {
+    dvx_out[lane] = 0.0;
+    dvy_out[lane] = 0.0;
+    dvz_out[lane] = 0.0;
+    wAx_out[lane] = 0.0;
+    wAy_out[lane] = 0.0;
+    wAz_out[lane] = 0.0;
+    wBx_out[lane] = 0.0;
+    wBy_out[lane] = 0.0;
+    wBz_out[lane] = 0.0;
+  }
+}
+
+void BodySoA::accumulate_linear(const ContactBatch& batch,
+                                const double* applied_n,
+                                const double* applied_t1,
+                                const double* applied_t2,
+                                int lanes,
+                                std::uint32_t lane_mask) {
+  for (int lane = 0; lane < lanes; ++lane) {
+    if ((lane_mask & (1u << lane)) == 0u) {
+      continue;
+    }
+
+    const int ia = batch.bodyA_index[lane];
+    const int ib = batch.bodyB_index[lane];
+    if (ia < 0 || ib < 0) {
+      continue;
+    }
+
+    const std::size_t idx_a = static_cast<std::size_t>(ia);
+    const std::size_t idx_b = static_cast<std::size_t>(ib);
+    if (idx_a >= vx.size() || idx_b >= vx.size()) {
+      continue;
+    }
+
+    const double an = applied_n ? applied_n[lane] : 0.0;
+    const double at1 = applied_t1 ? applied_t1[lane] : 0.0;
+    const double at2 = applied_t2 ? applied_t2[lane] : 0.0;
+
+    const double impulse_x = an * batch.nx[lane] + at1 * batch.t1x[lane] +
+                             at2 * batch.t2x[lane];
+    const double impulse_y = an * batch.ny[lane] + at1 * batch.t1y[lane] +
+                             at2 * batch.t2y[lane];
+    const double impulse_z = an * batch.nz[lane] + at1 * batch.t1z[lane] +
+                             at2 * batch.t2z[lane];
+
+    vx[idx_a] -= impulse_x * batch.invMassA[lane];
+    vy[idx_a] -= impulse_y * batch.invMassA[lane];
+    vz[idx_a] -= impulse_z * batch.invMassA[lane];
+
+    vx[idx_b] += impulse_x * batch.invMassB[lane];
+    vy[idx_b] += impulse_y * batch.invMassB[lane];
+    vz[idx_b] += impulse_z * batch.invMassB[lane];
+  }
+}
+
+void BodySoA::accumulate_angular(const ContactBatch& batch,
+                                 const double* applied_n,
+                                 const double* applied_t1,
+                                 const double* applied_t2,
+                                 int lanes,
+                                 std::uint32_t lane_mask) {
+  for (int lane = 0; lane < lanes; ++lane) {
+    if ((lane_mask & (1u << lane)) == 0u) {
+      continue;
+    }
+
+    const int ia = batch.bodyA_index[lane];
+    const int ib = batch.bodyB_index[lane];
+    if (ia < 0 || ib < 0) {
+      continue;
+    }
+
+    const std::size_t idx_a = static_cast<std::size_t>(ia);
+    const std::size_t idx_b = static_cast<std::size_t>(ib);
+    if (idx_a >= wx.size() || idx_b >= wx.size()) {
+      continue;
+    }
+
+    const double an = applied_n ? applied_n[lane] : 0.0;
+    const double at1 = applied_t1 ? applied_t1[lane] : 0.0;
+    const double at2 = applied_t2 ? applied_t2[lane] : 0.0;
+
+    const double dw_ax = an * batch.TWn_a_x[lane] +
+                         at1 * batch.TWt1_a_x[lane] +
+                         at2 * batch.TWt2_a_x[lane];
+    const double dw_ay = an * batch.TWn_a_y[lane] +
+                         at1 * batch.TWt1_a_y[lane] +
+                         at2 * batch.TWt2_a_y[lane];
+    const double dw_az = an * batch.TWn_a_z[lane] +
+                         at1 * batch.TWt1_a_z[lane] +
+                         at2 * batch.TWt2_a_z[lane];
+    const double dw_bx = an * batch.TWn_b_x[lane] +
+                         at1 * batch.TWt1_b_x[lane] +
+                         at2 * batch.TWt2_b_x[lane];
+    const double dw_by = an * batch.TWn_b_y[lane] +
+                         at1 * batch.TWt1_b_y[lane] +
+                         at2 * batch.TWt2_b_y[lane];
+    const double dw_bz = an * batch.TWn_b_z[lane] +
+                         at1 * batch.TWt1_b_z[lane] +
+                         at2 * batch.TWt2_b_z[lane];
+
+    wx[idx_a] -= dw_ax;
+    wy[idx_a] -= dw_ay;
+    wz[idx_a] -= dw_az;
+
+    wx[idx_b] += dw_bx;
+    wy[idx_b] += dw_by;
+    wz[idx_b] += dw_bz;
+  }
+}
 
 inline void apply_impulse_to_body(const RigidBody& body,
                                   BodySoA& state,
@@ -238,150 +525,92 @@ void apply_impulses_batch(std::vector<RigidBody>& bodies,
                           const double* delta_jt1,
                           const double* delta_jt2,
                           int start,
-                          int count) {
+                          int count,
+                          std::uint32_t lane_mask) {
+  BodySoA state(bodies.size());
+  state.load_from(bodies);
+
+  ContactBatch batch;
+  batch.lanes = count;
+  batch.start = start;
+
+  std::uint32_t valid_mask = 0u;
   for (int lane = 0; lane < count; ++lane) {
     const int idx = start + lane;
-    if (idx >= rows.N) {
-      break;
+    const bool enabled = ((lane_mask >> lane) & 1u) != 0u;
+    if (!enabled || idx >= rows.N) {
+      batch.lane_valid[lane] = false;
+      continue;
     }
 
     const int ia = rows.a[idx];
     const int ib = rows.b[idx];
     if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
         ib >= static_cast<int>(bodies.size())) {
+      batch.lane_valid[lane] = false;
       continue;
     }
 
-    RigidBody& A = bodies[ia];
-    RigidBody& B = bodies[ib];
-    const double dj_n = delta_jn[lane];
-    const double dj_t1 = delta_jt1[lane];
-    const double dj_t2 = delta_jt2[lane];
+    batch.lane_valid[lane] = true;
+    batch.bodyA_index[lane] = ia;
+    batch.bodyB_index[lane] = ib;
+    batch.invMassA[lane] = bodies[static_cast<std::size_t>(ia)].invMass;
+    batch.invMassB[lane] = bodies[static_cast<std::size_t>(ib)].invMass;
+    batch.nx[lane] = rows.nx[idx];
+    batch.ny[lane] = rows.ny[idx];
+    batch.nz[lane] = rows.nz[idx];
+    batch.t1x[lane] = rows.t1x[idx];
+    batch.t1y[lane] = rows.t1y[idx];
+    batch.t1z[lane] = rows.t1z[idx];
+    batch.t2x[lane] = rows.t2x[idx];
+    batch.t2y[lane] = rows.t2y[idx];
+    batch.t2z[lane] = rows.t2z[idx];
+    batch.TWn_a_x[lane] = rows.TWn_a_x[idx];
+    batch.TWn_a_y[lane] = rows.TWn_a_y[idx];
+    batch.TWn_a_z[lane] = rows.TWn_a_z[idx];
+    batch.TWn_b_x[lane] = rows.TWn_b_x[idx];
+    batch.TWn_b_y[lane] = rows.TWn_b_y[idx];
+    batch.TWn_b_z[lane] = rows.TWn_b_z[idx];
+    batch.TWt1_a_x[lane] = rows.TWt1_a_x[idx];
+    batch.TWt1_a_y[lane] = rows.TWt1_a_y[idx];
+    batch.TWt1_a_z[lane] = rows.TWt1_a_z[idx];
+    batch.TWt1_b_x[lane] = rows.TWt1_b_x[idx];
+    batch.TWt1_b_y[lane] = rows.TWt1_b_y[idx];
+    batch.TWt1_b_z[lane] = rows.TWt1_b_z[idx];
+    batch.TWt2_a_x[lane] = rows.TWt2_a_x[idx];
+    batch.TWt2_a_y[lane] = rows.TWt2_a_y[idx];
+    batch.TWt2_a_z[lane] = rows.TWt2_a_z[idx];
+    batch.TWt2_b_x[lane] = rows.TWt2_b_x[idx];
+    batch.TWt2_b_y[lane] = rows.TWt2_b_y[idx];
+    batch.TWt2_b_z[lane] = rows.TWt2_b_z[idx];
 
-    const double impulse_x = rows.nx[idx] * dj_n + rows.t1x[idx] * dj_t1 +
-                             rows.t2x[idx] * dj_t2;
-    const double impulse_y = rows.ny[idx] * dj_n + rows.t1y[idx] * dj_t1 +
-                             rows.t2y[idx] * dj_t2;
-    const double impulse_z = rows.nz[idx] * dj_n + rows.t1z[idx] * dj_t1 +
-                             rows.t2z[idx] * dj_t2;
-
-    A.v.x -= impulse_x * A.invMass;
-    A.v.y -= impulse_y * A.invMass;
-    A.v.z -= impulse_z * A.invMass;
-    B.v.x += impulse_x * B.invMass;
-    B.v.y += impulse_y * B.invMass;
-    B.v.z += impulse_z * B.invMass;
-
-    const double dw_ax = dj_n * rows.TWn_a_x[idx] +
-                         dj_t1 * rows.TWt1_a_x[idx] +
-                         dj_t2 * rows.TWt2_a_x[idx];
-    const double dw_ay = dj_n * rows.TWn_a_y[idx] +
-                         dj_t1 * rows.TWt1_a_y[idx] +
-                         dj_t2 * rows.TWt2_a_y[idx];
-    const double dw_az = dj_n * rows.TWn_a_z[idx] +
-                         dj_t1 * rows.TWt1_a_z[idx] +
-                         dj_t2 * rows.TWt2_a_z[idx];
-    const double dw_bx = dj_n * rows.TWn_b_x[idx] +
-                         dj_t1 * rows.TWt1_b_x[idx] +
-                         dj_t2 * rows.TWt2_b_x[idx];
-    const double dw_by = dj_n * rows.TWn_b_y[idx] +
-                         dj_t1 * rows.TWt1_b_y[idx] +
-                         dj_t2 * rows.TWt2_b_y[idx];
-    const double dw_bz = dj_n * rows.TWn_b_z[idx] +
-                         dj_t1 * rows.TWt1_b_z[idx] +
-                         dj_t2 * rows.TWt2_b_z[idx];
-
-    A.w.x -= dw_ax;
-    A.w.y -= dw_ay;
-    A.w.z -= dw_az;
-    B.w.x += dw_bx;
-    B.w.y += dw_by;
-    B.w.z += dw_bz;
+    valid_mask |= (1u << lane);
   }
+
+  if (valid_mask != 0u) {
+    alignas(32) double applied_n[soa::kLane] = {};
+    alignas(32) double applied_t1[soa::kLane] = {};
+    alignas(32) double applied_t2[soa::kLane] = {};
+    for (int lane = 0; lane < count; ++lane) {
+      if ((valid_mask & (1u << lane)) == 0u) {
+        continue;
+      }
+
+      applied_n[lane] = delta_jn[lane];
+      applied_t1[lane] = delta_jt1[lane];
+      applied_t2[lane] = delta_jt2[lane];
+    }
+
+    state.accumulate_linear(batch, applied_n, applied_t1, applied_t2, count,
+                            valid_mask);
+    state.accumulate_angular(batch, applied_n, applied_t1, applied_t2, count,
+                             valid_mask);
+  }
+
+  state.store_to(bodies);
 }
 
 }  // namespace soa_simd
-
-namespace {
-
-struct ContactBatch {
-  int lanes = 0;
-  int start = 0;
-  int bodyA_index[soa::kLane] = {};
-  int bodyB_index[soa::kLane] = {};
-  double invMassA[soa::kLane] = {};
-  double invMassB[soa::kLane] = {};
-  bool lane_valid[soa::kLane] = {};
-  alignas(32) double nx[soa::kLane] = {};
-  alignas(32) double ny[soa::kLane] = {};
-  alignas(32) double nz[soa::kLane] = {};
-  alignas(32) double t1x[soa::kLane] = {};
-  alignas(32) double t1y[soa::kLane] = {};
-  alignas(32) double t1z[soa::kLane] = {};
-  alignas(32) double t2x[soa::kLane] = {};
-  alignas(32) double t2y[soa::kLane] = {};
-  alignas(32) double t2z[soa::kLane] = {};
-  alignas(32) double raxn_x[soa::kLane] = {};
-  alignas(32) double raxn_y[soa::kLane] = {};
-  alignas(32) double raxn_z[soa::kLane] = {};
-  alignas(32) double rbxn_x[soa::kLane] = {};
-  alignas(32) double rbxn_y[soa::kLane] = {};
-  alignas(32) double rbxn_z[soa::kLane] = {};
-  alignas(32) double raxt1_x[soa::kLane] = {};
-  alignas(32) double raxt1_y[soa::kLane] = {};
-  alignas(32) double raxt1_z[soa::kLane] = {};
-  alignas(32) double rbxt1_x[soa::kLane] = {};
-  alignas(32) double rbxt1_y[soa::kLane] = {};
-  alignas(32) double rbxt1_z[soa::kLane] = {};
-  alignas(32) double raxt2_x[soa::kLane] = {};
-  alignas(32) double raxt2_y[soa::kLane] = {};
-  alignas(32) double raxt2_z[soa::kLane] = {};
-  alignas(32) double rbxt2_x[soa::kLane] = {};
-  alignas(32) double rbxt2_y[soa::kLane] = {};
-  alignas(32) double rbxt2_z[soa::kLane] = {};
-  alignas(32) double TWn_a_x[soa::kLane] = {};
-  alignas(32) double TWn_a_y[soa::kLane] = {};
-  alignas(32) double TWn_a_z[soa::kLane] = {};
-  alignas(32) double TWn_b_x[soa::kLane] = {};
-  alignas(32) double TWn_b_y[soa::kLane] = {};
-  alignas(32) double TWn_b_z[soa::kLane] = {};
-  alignas(32) double TWt1_a_x[soa::kLane] = {};
-  alignas(32) double TWt1_a_y[soa::kLane] = {};
-  alignas(32) double TWt1_a_z[soa::kLane] = {};
-  alignas(32) double TWt1_b_x[soa::kLane] = {};
-  alignas(32) double TWt1_b_y[soa::kLane] = {};
-  alignas(32) double TWt1_b_z[soa::kLane] = {};
-  alignas(32) double TWt2_a_x[soa::kLane] = {};
-  alignas(32) double TWt2_a_y[soa::kLane] = {};
-  alignas(32) double TWt2_a_z[soa::kLane] = {};
-  alignas(32) double TWt2_b_x[soa::kLane] = {};
-  alignas(32) double TWt2_b_y[soa::kLane] = {};
-  alignas(32) double TWt2_b_z[soa::kLane] = {};
-  alignas(32) double inv_k_n[soa::kLane] = {};
-  alignas(32) double inv_k_t1[soa::kLane] = {};
-  alignas(32) double inv_k_t2[soa::kLane] = {};
-  alignas(32) double bias[soa::kLane] = {};
-  alignas(32) double bounce[soa::kLane] = {};
-  alignas(32) double mu[soa::kLane] = {};
-  alignas(32) double jn[soa::kLane] = {};
-  alignas(32) double jt1[soa::kLane] = {};
-  alignas(32) double jt2[soa::kLane] = {};
-  alignas(32) double jn_pre_clamp[soa::kLane] = {};
-  alignas(32) double jn_new[soa::kLane] = {};
-  alignas(32) double v_rel_t1[soa::kLane] = {};
-  alignas(32) double v_rel_t2[soa::kLane] = {};
-  alignas(32) double dvx[soa::kLane] = {};
-  alignas(32) double dvy[soa::kLane] = {};
-  alignas(32) double dvz[soa::kLane] = {};
-  alignas(32) double wAx[soa::kLane] = {};
-  alignas(32) double wAy[soa::kLane] = {};
-  alignas(32) double wAz[soa::kLane] = {};
-  alignas(32) double wBx[soa::kLane] = {};
-  alignas(32) double wBy[soa::kLane] = {};
-  alignas(32) double wBz[soa::kLane] = {};
-};
-
-}  // namespace
 
 void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
                            std::vector<Contact>& contacts,
@@ -664,32 +893,32 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         continue;
       }
 
+      std::uint32_t lane_mask = 0u;
       for (int lane = 0; lane < lanes; ++lane) {
-        if (!batch.lane_valid[lane]) {
-          batch.dvx[lane] = 0.0;
-          batch.dvy[lane] = 0.0;
-          batch.dvz[lane] = 0.0;
-          batch.wAx[lane] = 0.0;
-          batch.wAy[lane] = 0.0;
-          batch.wAz[lane] = 0.0;
-          batch.wBx[lane] = 0.0;
-          batch.wBy[lane] = 0.0;
-          batch.wBz[lane] = 0.0;
-          continue;
+        if (batch.lane_valid[lane]) {
+          lane_mask |= (1u << lane);
         }
-
-        const int ia = batch.bodyA_index[lane];
-        const int ib = batch.bodyB_index[lane];
-        batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-        batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-        batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-        batch.wAx[lane] = body_state.wx[ia];
-        batch.wAy[lane] = body_state.wy[ia];
-        batch.wAz[lane] = body_state.wz[ia];
-        batch.wBx[lane] = body_state.wx[ib];
-        batch.wBy[lane] = body_state.wy[ib];
-        batch.wBz[lane] = body_state.wz[ib];
       }
+
+      if (lane_mask == 0u) {
+        for (int lane = 0; lane < lanes; ++lane) {
+          const int idx = batch.start + lane;
+          if (idx < rows.N) {
+            rows.jn[idx] = 0.0;
+            rows.jt1[idx] = 0.0;
+            rows.jt2[idx] = 0.0;
+          }
+          batch.jn[lane] = 0.0;
+          batch.jt1[lane] = 0.0;
+          batch.jt2[lane] = 0.0;
+        }
+        continue;
+      }
+
+      body_state.gather_contact(batch, batch.dvx, batch.dvy, batch.dvz,
+                                batch.wAx, batch.wAy, batch.wAz,
+                                batch.wBx, batch.wBy, batch.wBz, lanes,
+                                lane_mask);
 
       VecD dvx_v = VecD::load(batch.dvx);
       VecD dvy_v = VecD::load(batch.dvy);
@@ -732,12 +961,17 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       jn_candidate_v.store(batch.jn_pre_clamp);
       jn_clamped_v.store(batch.jn_new);
 
+      alignas(32) double applied_n[soa::kLane] = {};
       for (int lane = 0; lane < lanes; ++lane) {
         const int idx = batch.start + lane;
         if (!batch.lane_valid[lane]) {
-          rows.jn[idx] = 0.0;
-          rows.jt1[idx] = 0.0;
-          rows.jt2[idx] = 0.0;
+          if (idx < rows.N) {
+            rows.jn[idx] = 0.0;
+            rows.jt1[idx] = 0.0;
+            rows.jt2[idx] = 0.0;
+          }
+          batch.jn[lane] = 0.0;
+          applied_n[lane] = 0.0;
           continue;
         }
 
@@ -751,52 +985,22 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         }
 
         const double applied = jn_new - batch.jn[lane];
-        rows.jn[idx] = jn_new;
-        batch.jn[lane] = jn_new;
-
-        if (std::fabs(applied) > math::kEps) {
-          const double impulse_x = applied * batch.nx[lane];
-          const double impulse_y = applied * batch.ny[lane];
-          const double impulse_z = applied * batch.nz[lane];
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
-
-          body_state.wx[ia] -= applied * batch.TWn_a_x[lane];
-          body_state.wy[ia] -= applied * batch.TWn_a_y[lane];
-          body_state.wz[ia] -= applied * batch.TWn_a_z[lane];
-          body_state.wx[ib] += applied * batch.TWn_b_x[lane];
-          body_state.wy[ib] += applied * batch.TWn_b_y[lane];
-          body_state.wz[ib] += applied * batch.TWn_b_z[lane];
-
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
-        } else {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
+        if (idx < rows.N) {
+          rows.jn[idx] = jn_new;
         }
+        batch.jn[lane] = jn_new;
+        applied_n[lane] = applied;
       }
+
+      body_state.accumulate_linear(batch, applied_n, nullptr, nullptr, lanes,
+                                   lane_mask);
+      body_state.accumulate_angular(batch, applied_n, nullptr, nullptr, lanes,
+                                    lane_mask);
+
+      body_state.gather_contact(batch, batch.dvx, batch.dvy, batch.dvz,
+                                batch.wAx, batch.wAy, batch.wAz,
+                                batch.wBx, batch.wBy, batch.wBz, lanes,
+                                lane_mask);
 
       dvx_v = VecD::load(batch.dvx);
       dvy_v = VecD::load(batch.dvy);
@@ -851,22 +1055,35 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
       v_rel_t1_v.store(batch.v_rel_t1);
       v_rel_t2_v.store(batch.v_rel_t2);
 
+      alignas(32) double applied_t1[soa::kLane] = {};
+      alignas(32) double applied_t2[soa::kLane] = {};
+      alignas(32) double additional_normal[soa::kLane] = {};
       for (int lane = 0; lane < lanes; ++lane) {
         const int idx = batch.start + lane;
         if (!batch.lane_valid[lane]) {
-          rows.jt1[idx] = 0.0;
-          rows.jt2[idx] = 0.0;
+          if (idx < rows.N) {
+            rows.jt1[idx] = 0.0;
+            rows.jt2[idx] = 0.0;
+          }
           batch.jt1[lane] = 0.0;
           batch.jt2[lane] = 0.0;
+          applied_t1[lane] = 0.0;
+          applied_t2[lane] = 0.0;
+          additional_normal[lane] = 0.0;
           continue;
         }
 
         const double mu = batch.mu[lane];
         if (mu <= math::kEps) {
-          rows.jt1[idx] = 0.0;
-          rows.jt2[idx] = 0.0;
+          if (idx < rows.N) {
+            rows.jt1[idx] = 0.0;
+            rows.jt2[idx] = 0.0;
+          }
           batch.jt1[lane] = 0.0;
           batch.jt2[lane] = 0.0;
+          applied_t1[lane] = 0.0;
+          applied_t2[lane] = 0.0;
+          additional_normal[lane] = 0.0;
           continue;
         }
 
@@ -879,8 +1096,7 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
         double jt2_candidate =
             jt2_old + (-batch.v_rel_t2[lane]) * batch.inv_k_t2[lane];
 
-        double friction_max =
-            mu * std::max(batch.jn_new[lane], 0.0);
+        double friction_max = mu * std::max(batch.jn_new[lane], 0.0);
         const double jt_mag_sq =
             jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
         double friction_max_sq = friction_max * friction_max;
@@ -892,39 +1108,12 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
             const double required_jn = jt_mag / mu;
             const double delta_needed = required_jn - batch.jn_new[lane];
             if (delta_needed > math::kEps) {
-              const int ia = batch.bodyA_index[lane];
-              const int ib = batch.bodyB_index[lane];
-              const double impulse_x = delta_needed * batch.nx[lane];
-              const double impulse_y = delta_needed * batch.ny[lane];
-              const double impulse_z = delta_needed * batch.nz[lane];
-
-              body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-              body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-              body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-              body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-              body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-              body_state.vz[ib] += impulse_z * batch.invMassB[lane];
-
-              body_state.wx[ia] -= delta_needed * batch.TWn_a_x[lane];
-              body_state.wy[ia] -= delta_needed * batch.TWn_a_y[lane];
-              body_state.wz[ia] -= delta_needed * batch.TWn_a_z[lane];
-              body_state.wx[ib] += delta_needed * batch.TWn_b_x[lane];
-              body_state.wy[ib] += delta_needed * batch.TWn_b_y[lane];
-              body_state.wz[ib] += delta_needed * batch.TWn_b_z[lane];
-
-              batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-              batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-              batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-              batch.wAx[lane] = body_state.wx[ia];
-              batch.wAy[lane] = body_state.wy[ia];
-              batch.wAz[lane] = body_state.wz[ia];
-              batch.wBx[lane] = body_state.wx[ib];
-              batch.wBy[lane] = body_state.wy[ib];
-              batch.wBz[lane] = body_state.wz[ib];
-
+              additional_normal[lane] = delta_needed;
               batch.jn_new[lane] = required_jn;
               batch.jn[lane] = required_jn;
-              rows.jn[idx] = required_jn;
+              if (idx < rows.N) {
+                rows.jn[idx] = required_jn;
+              }
               friction_max = mu * std::max(batch.jn_new[lane], 0.0);
               friction_max_sq = friction_max * friction_max;
             }
@@ -943,53 +1132,26 @@ void solve_scalar_soa_simd(std::vector<RigidBody>& bodies,
 
         const double delta_jt1 = jt1_candidate - jt1_old;
         const double delta_jt2 = jt2_candidate - jt2_old;
-        rows.jt1[idx] = jt1_candidate;
-        rows.jt2[idx] = jt2_candidate;
+        if (idx < rows.N) {
+          rows.jt1[idx] = jt1_candidate;
+          rows.jt2[idx] = jt2_candidate;
+        }
         batch.jt1[lane] = jt1_candidate;
         batch.jt2[lane] = jt2_candidate;
+        applied_t1[lane] = delta_jt1;
+        applied_t2[lane] = delta_jt2;
+      }
 
-        if (std::fabs(delta_jt1) > math::kEps ||
-            std::fabs(delta_jt2) > math::kEps) {
-          const int ia = batch.bodyA_index[lane];
-          const int ib = batch.bodyB_index[lane];
+      if (lane_mask != 0u) {
+        body_state.accumulate_linear(batch, additional_normal, nullptr, nullptr,
+                                     lanes, lane_mask);
+        body_state.accumulate_angular(batch, additional_normal, nullptr, nullptr,
+                                      lanes, lane_mask);
 
-          const double impulse_x = delta_jt1 * batch.t1x[lane] +
-                                   delta_jt2 * batch.t2x[lane];
-          const double impulse_y = delta_jt1 * batch.t1y[lane] +
-                                   delta_jt2 * batch.t2y[lane];
-          const double impulse_z = delta_jt1 * batch.t1z[lane] +
-                                   delta_jt2 * batch.t2z[lane];
-
-          body_state.vx[ia] -= impulse_x * batch.invMassA[lane];
-          body_state.vy[ia] -= impulse_y * batch.invMassA[lane];
-          body_state.vz[ia] -= impulse_z * batch.invMassA[lane];
-          body_state.vx[ib] += impulse_x * batch.invMassB[lane];
-          body_state.vy[ib] += impulse_y * batch.invMassB[lane];
-          body_state.vz[ib] += impulse_z * batch.invMassB[lane];
-
-          body_state.wx[ia] -= delta_jt1 * batch.TWt1_a_x[lane] +
-                               delta_jt2 * batch.TWt2_a_x[lane];
-          body_state.wy[ia] -= delta_jt1 * batch.TWt1_a_y[lane] +
-                               delta_jt2 * batch.TWt2_a_y[lane];
-          body_state.wz[ia] -= delta_jt1 * batch.TWt1_a_z[lane] +
-                               delta_jt2 * batch.TWt2_a_z[lane];
-          body_state.wx[ib] += delta_jt1 * batch.TWt1_b_x[lane] +
-                               delta_jt2 * batch.TWt2_b_x[lane];
-          body_state.wy[ib] += delta_jt1 * batch.TWt1_b_y[lane] +
-                               delta_jt2 * batch.TWt2_b_y[lane];
-          body_state.wz[ib] += delta_jt1 * batch.TWt1_b_z[lane] +
-                               delta_jt2 * batch.TWt2_b_z[lane];
-
-          batch.dvx[lane] = body_state.vx[ib] - body_state.vx[ia];
-          batch.dvy[lane] = body_state.vy[ib] - body_state.vy[ia];
-          batch.dvz[lane] = body_state.vz[ib] - body_state.vz[ia];
-          batch.wAx[lane] = body_state.wx[ia];
-          batch.wAy[lane] = body_state.wy[ia];
-          batch.wAz[lane] = body_state.wz[ia];
-          batch.wBx[lane] = body_state.wx[ib];
-          batch.wBy[lane] = body_state.wy[ib];
-          batch.wBz[lane] = body_state.wz[ib];
-        }
+        body_state.accumulate_linear(batch, nullptr, applied_t1, applied_t2,
+                                     lanes, lane_mask);
+        body_state.accumulate_angular(batch, nullptr, applied_t1, applied_t2,
+                                      lanes, lane_mask);
       }
     }
 

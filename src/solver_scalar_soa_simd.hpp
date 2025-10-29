@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <cstdint>
 
 #include "soa_pack.hpp"
 
@@ -31,7 +32,8 @@ void apply_impulses_batch(std::vector<RigidBody>& bodies,
                           const double* delta_jt1,
                           const double* delta_jt2,
                           int start,
-                          int count);
+                          int count,
+                          std::uint32_t lane_mask = 0xFFFFFFFFu);
 
 }  // namespace soa_simd
 
