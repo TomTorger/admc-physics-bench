@@ -59,7 +59,8 @@ void test_pendulum_length_preservation() {
     run_cached_step(scene, params);
   }
   build_distance_joint_rows(scene.bodies, scene.joints, params.dt);
-  assert(joint_error_Linf(scene.joints) < 1e-5);
+  const double joint_err = joint_error_Linf(scene.joints);
+  assert(joint_err < 1e-5);
 
   Scene momentum_scene = make_pendulum(1);
   for (DistanceJoint& j : momentum_scene.joints) {

@@ -39,6 +39,8 @@ struct JointSOA {
   std::vector<double> j;
   std::vector<uint8_t> rope;
   std::vector<double> C;
+  std::vector<double> rest;
+  std::vector<double> beta;
   std::vector<int> indices;
 
   std::size_t size() const { return a.size(); }
@@ -55,6 +57,8 @@ struct JointSOA {
     j.clear();
     rope.clear();
     C.clear();
+    rest.clear();
+    beta.clear();
     indices.clear();
   }
 
@@ -70,6 +74,8 @@ struct JointSOA {
     j.reserve(capacity);
     rope.reserve(capacity);
     C.reserve(capacity);
+    rest.reserve(capacity);
+    beta.reserve(capacity);
     indices.reserve(capacity);
   }
 };

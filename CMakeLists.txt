@@ -40,7 +40,8 @@ add_library(core
   src/math.hpp src/types.hpp
   src/contact_gen.cc src/scenes.cc src/metrics.cc src/metrics_micro.cc src/joints.cc
   src/solver_baseline_vec.cc src/solver_scalar_cached.cc src/solver_scalar_soa.cc
-  src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc)
+  src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
+  src/solver_scalar_soa_fourth.cc)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 
