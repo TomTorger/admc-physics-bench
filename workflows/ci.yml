@@ -26,3 +26,36 @@ jobs:
         if: success() && hashFiles('results/ci_quick.csv') != ''
         run: |
           python3 scripts/ci_summary.py results/ci_quick.csv | tee -a "$GITHUB_STEP_SUMMARY"
+
+  bench-and-plot:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install plotting dependencies
+        run: python3 -m pip install --upgrade pip && python3 -m pip install matplotlib
+
+      - name: Run scaling bench and generate charts
+        run: bash scripts/ci_plot_scaling.sh
+
+      - name: Commit updated charts
+        run: |
+          CHANGED=$(git status --porcelain docs/assets/perf_scaling.svg docs/assets/perf_scaling_speedup.svg)
+          if [[ -n "$CHANGED" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/assets/perf_scaling.svg docs/assets/perf_scaling_speedup.svg
+            git commit -m "Update performance scaling charts [skip ci]"
+            git push
+          else
+            echo "Charts already up to date"
+          fi
