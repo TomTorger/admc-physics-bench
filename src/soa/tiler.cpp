@@ -159,6 +159,7 @@ std::vector<Tile> build_tiles_from_contacts(const World& world,
           kn = 1.0f;
         }
         tile.k_n[static_cast<std::size_t>(local)] = kn;
+        tile.inv_k_n[static_cast<std::size_t>(local)] = 1.0f / kn;
 
         double vax0 = 0.0;
         double vay0 = 0.0;

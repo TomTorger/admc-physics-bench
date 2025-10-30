@@ -16,6 +16,7 @@ struct Tile {
   AlignedVec<float> rAx, rAy, rAz;
   AlignedVec<float> rBx, rBy, rBz;
   AlignedVec<float> k_n;
+  AlignedVec<float> inv_k_n;
   AlignedVec<float> target_n;
   AlignedVec<float> j_n;
 
@@ -67,6 +68,7 @@ struct Tile {
     rBy.resize(static_cast<std::size_t>(rows));
     rBz.resize(static_cast<std::size_t>(rows));
     k_n.resize(static_cast<std::size_t>(rows));
+    inv_k_n.resize(static_cast<std::size_t>(rows));
     target_n.resize(static_cast<std::size_t>(rows));
     j_n.resize(static_cast<std::size_t>(rows));
     contactIndices.resize(static_cast<std::size_t>(rows));
