@@ -9,9 +9,9 @@
 #include <cmath>
 #include <vector>
 
-#if defined(ADMC_USE_AVX2)
+#if defined(ADMC_ENABLE_AVX2)
 #include <immintrin.h>
-#elif defined(ADMC_USE_NEON)
+#elif defined(ADMC_ENABLE_NEON)
 #include <arm_neon.h>
 #endif
 
@@ -83,7 +83,7 @@ inline void apply_impulse_to_body(const RigidBody& body,
   state.wz[static_cast<std::size_t>(index)] += delta_w.z;
 }
 
-#if defined(ADMC_USE_AVX2)
+#if defined(ADMC_ENABLE_AVX2)
 struct VecD {
   __m256d v;
 
@@ -116,7 +116,7 @@ inline VecD min(VecD a, VecD b) { return VecD{_mm256_min_pd(a.v, b.v)}; }
 inline VecD sqrt(VecD a) { return VecD{_mm256_sqrt_pd(a.v)}; }
 
 inline VecD negate(VecD a) { return VecD{_mm256_sub_pd(_mm256_setzero_pd(), a.v)}; }
-#elif defined(ADMC_USE_NEON)
+#elif defined(ADMC_ENABLE_NEON)
 struct VecD {
   float64x2_t v;
 

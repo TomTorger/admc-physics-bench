@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -64,8 +65,23 @@ struct BenchmarkResult {
   std::string commit_sha;
 };
 
+std::string default_results_csv_path() {
+  using clock = std::chrono::system_clock;
+  const auto now = clock::now();
+  const std::time_t tt = clock::to_time_t(now);
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &tt);
+#else
+  localtime_r(&tt, &tm);
+#endif
+  std::ostringstream oss;
+  oss << "results/" << std::put_time(&tm, "%Y%m%d") << "/results.csv";
+  return oss.str();
+}
+
 std::vector<BenchmarkResult> g_results;
-std::string g_results_csv_path = "results/results.csv";
+std::string g_results_csv_path = default_results_csv_path();
 
 using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
@@ -114,6 +130,17 @@ void configure_solver_params(const std::string& scene_name,
     params.slop = 0.0;
     params.restitution = 1.0;
     params.mu = 0.0;
+    params.spheres_only = true;
+    params.frictionless = true;
+  } else if (scene_name == "spheres_cloud_10k" ||
+             scene_name == "spheres_cloud_50k") {
+    params.mu = 0.0;
+    params.spheres_only = true;
+    params.frictionless = true;
+  } else if (scene_name == "spheres_cloud_10k_fric") {
+    params.mu = (params.mu <= 0.0) ? 0.5 : params.mu;
+    params.spheres_only = true;
+    params.frictionless = false;
   }
 }
 
@@ -126,7 +153,7 @@ struct CliOptions {
   int steps = 30;
   double dt = 1.0 / 60.0;
   int threads = 1;
-  std::string csv_path = "results/results.csv";
+  std::string csv_path = default_results_csv_path();
   std::vector<int> sizes;
   std::vector<std::string> solver_list;
   std::vector<int> tile_sizes;
@@ -207,8 +234,8 @@ std::string normalize_solver_name(std::string name) {
     return "soa";
   }
   if (name == "scalar_soa_vectorized" || name == "soa_vec" ||
-      name == "soa_vectorized") {
-    return "soa_vectorized";
+      name == "soa_vectorized" || name == "vec_soa") {
+    return "vec_soa";
   }
   if (name == "baseline_vec") {
     return "baseline";
@@ -225,6 +252,12 @@ bool make_scene_by_name(const std::string& name, Scene* scene) {
     *scene = make_spheres_box_cloud(4096);
   } else if (name == "spheres_cloud_8192") {
     *scene = make_spheres_box_cloud(8192);
+  } else if (name == "spheres_cloud_10k") {
+    *scene = make_spheres_box_cloud(10000);
+  } else if (name == "spheres_cloud_50k") {
+    *scene = make_spheres_box_cloud(50000);
+  } else if (name == "spheres_cloud_10k_fric") {
+    *scene = make_spheres_box_cloud(10000);
   } else if (name == "box_stack_4") {
     *scene = make_box_stack(4);
   } else if (name == "box_stack") {
@@ -472,7 +505,7 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     BenchmarkResult soa_result =
         run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
     return soa_result;
-  } else if (normalized == "soa_vectorized") {
+  } else if (normalized == "vec_soa") {
     SoaParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
@@ -540,22 +573,34 @@ void run_default_suite(const std::string& csv_path) {
       {"two_spheres", "baseline", 10, 1},
       {"two_spheres", "cached", 10, 1},
       {"two_spheres", "soa", 10, 1},
-      {"two_spheres", "soa_vectorized", 10, 1},
+      {"two_spheres", "vec_soa", 10, 1},
       {"spheres_cloud_1024", "baseline", 10, 30},
       {"spheres_cloud_1024", "cached", 10, 30},
       {"spheres_cloud_1024", "soa", 10, 30},
-      {"spheres_cloud_1024", "soa_vectorized", 10, 30},
+      {"spheres_cloud_1024", "vec_soa", 10, 30},
       {"box_stack_4", "baseline", 10, 30},
       {"box_stack_4", "cached", 10, 30},
       {"box_stack_4", "soa", 10, 30},
-      {"box_stack_4", "soa_vectorized", 10, 30},
+      {"box_stack_4", "vec_soa", 10, 30},
+      {"spheres_cloud_10k", "baseline", 10, 30},
+      {"spheres_cloud_10k", "cached", 10, 30},
+      {"spheres_cloud_10k", "soa", 10, 30},
+      {"spheres_cloud_10k", "vec_soa", 10, 30},
+      {"spheres_cloud_50k", "baseline", 10, 30},
+      {"spheres_cloud_50k", "cached", 10, 30},
+      {"spheres_cloud_50k", "soa", 10, 30},
+      {"spheres_cloud_50k", "vec_soa", 10, 30},
+      {"spheres_cloud_10k_fric", "baseline", 10, 30},
+      {"spheres_cloud_10k_fric", "cached", 10, 30},
+      {"spheres_cloud_10k_fric", "soa", 10, 30},
+      {"spheres_cloud_10k_fric", "vec_soa", 10, 30},
   };
 
   const char* run_large_env = std::getenv("RUN_LARGE");
   if (run_large_env && std::string(run_large_env) == "1") {
     cases.push_back({"spheres_cloud_8192", "cached", 10, 30});
     cases.push_back({"spheres_cloud_8192", "soa", 10, 30});
-    cases.push_back({"spheres_cloud_8192", "soa_vectorized", 10, 30});
+    cases.push_back({"spheres_cloud_8192", "vec_soa", 10, 30});
   }
 
   std::vector<BenchmarkResult> results;
@@ -594,7 +639,7 @@ bool run_cli_mode(const CliOptions& opts) {
   if (!opts.solver_list.empty()) {
     solvers = opts.solver_list;
   } else if (opts.solver == "auto") {
-    solvers = {"baseline", "cached", "soa", "soa_vectorized"};
+    solvers = {"baseline", "cached", "soa", "vec_soa"};
   } else {
     solvers.push_back(opts.solver);
   }
@@ -646,8 +691,7 @@ bool run_cli_mode(const CliOptions& opts) {
   for (const SceneRequest& req : scenes) {
     for (const std::string& solver_name : solvers) {
       const std::string normalized = normalize_solver_name(solver_name);
-      const bool uses_tiles =
-          (normalized == "soa" || normalized == "soa_vectorized");
+      const bool uses_tiles = (normalized == "soa" || normalized == "vec_soa");
       if (uses_tiles) {
         for (int tile_size : tile_sizes) {
           const int override_tile = (tile_size > 0) ? tile_size : -1;
@@ -1501,7 +1545,7 @@ const char* solver_label(SoaSolverVariant variant) {
     case SoaSolverVariant::kLegacy:
       return "scalar_soa";
     case SoaSolverVariant::kVectorized:
-      return "scalar_soa_vectorized";
+      return "vec_soa";
   }
   return "scalar_soa";
 }
