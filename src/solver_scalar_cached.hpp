@@ -13,6 +13,8 @@ struct SolverParams {
   double mu = 0.5;
   double dt = 1.0 / 60.0;
   bool warm_start = true;
+  int tile_size = 128;
+  int max_contacts_per_tile = 128;
 };
 
 void solve_scalar_cached(std::vector<RigidBody>& bodies,

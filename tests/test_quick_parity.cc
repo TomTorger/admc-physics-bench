@@ -1,4 +1,6 @@
 #include "bench_csv_schema.hpp"
+#include "contact_gen.hpp"
+#include "metrics.hpp"
 #include "scenes.hpp"
 #include "solver_baseline_vec.hpp"
 #include "solver_scalar_cached.hpp"
@@ -40,6 +42,8 @@ int main() {
   // Frictionless parity on tiny scenes (fast)
   {
     Scene scene = make_two_spheres_head_on();
+    const double expected_v0 = -scene.bodies[0].v.x;
+    const double expected_v1 = -scene.bodies[1].v.x;
 
     BaselineParams pb;
     pb.iterations = 10;
@@ -56,22 +60,32 @@ int main() {
     ps.mu = 0.0;
     ps.dt = pb.dt;
 
-    auto B1 = scene.bodies;
-    auto B2 = scene.bodies;
-    auto B3 = scene.bodies;
-    auto C1 = scene.contacts;
-    auto C2 = scene.contacts;
-    auto C3 = scene.contacts;
+    auto baseline_bodies = scene.bodies;
+    auto cached_bodies = scene.bodies;
+    auto soa_bodies = scene.bodies;
+    auto baseline_contacts = scene.contacts;
+    auto cached_contacts = scene.contacts;
+    auto soa_contacts = scene.contacts;
 
-    solve_baseline(B1, C1, pb);
-    solve_scalar_cached(B2, C2, ps);
+    build_contact_offsets_and_bias(baseline_bodies, baseline_contacts, pb);
+    solve_baseline(baseline_bodies, baseline_contacts, pb);
+    assert(std::fabs(baseline_bodies[0].v.x - expected_v0) <= 1e-6);
+    assert(std::fabs(baseline_bodies[1].v.x - expected_v1) <= 1e-6);
 
+    build_contact_offsets_and_bias(cached_bodies, cached_contacts, ps);
+    solve_scalar_cached(cached_bodies, cached_contacts, ps);
+    assert(std::fabs(cached_bodies[0].v.x - expected_v0) <= 1e-6);
+    assert(std::fabs(cached_bodies[1].v.x - expected_v1) <= 1e-6);
+
+    build_contact_offsets_and_bias(soa_bodies, soa_contacts, ps);
     RowSOA rows;
-    build_soa(B3, C3, ps, rows);
-    solve_scalar_soa(B3, C3, rows, ps);
+    build_soa(soa_bodies, soa_contacts, ps, rows);
+    solve_scalar_soa(soa_bodies, soa_contacts, rows, ps);
+    assert(std::fabs(soa_bodies[0].v.x - expected_v0) <= 1e-6);
+    assert(std::fabs(soa_bodies[1].v.x - expected_v1) <= 1e-6);
 
-    const double d12 = max_abs_diff(B1, B2);
-    const double d13 = max_abs_diff(B1, B3);
+    const double d12 = max_abs_diff(baseline_bodies, cached_bodies);
+    const double d13 = max_abs_diff(baseline_bodies, soa_bodies);
     assert(d12 <= 1e-6 && "Parity: baseline vs scalar must match on two_spheres");
     assert(d13 <= 1e-6 && "Parity: baseline vs SoA must match on two_spheres");
   }
@@ -94,16 +108,28 @@ int main() {
     ps.mu = 0.0;
     ps.dt = pb.dt;
 
-    auto B1 = scene.bodies;
-    auto B2 = scene.bodies;
-    auto C1 = scene.contacts;
-    auto C2 = scene.contacts;
+    auto baseline_bodies = scene.bodies;
+    auto soa_bodies = scene.bodies;
+    auto baseline_contacts = scene.contacts;
+    auto soa_contacts = scene.contacts;
 
-    solve_baseline(B1, C1, pb);
-    solve_scalar_cached(B2, C2, ps);
+    const int steps = 5;
+    RowSOA rows;
+    for (int step = 0; step < steps; ++step) {
+      build_contact_offsets_and_bias(baseline_bodies, baseline_contacts, pb);
+      solve_baseline(baseline_bodies, baseline_contacts, pb);
 
-    const double d = max_abs_diff(B1, B2);
-    assert(d <= 1e-4 && "Parity (approx): cached within tolerance on spheres_cloud_256");
+      build_contact_offsets_and_bias(soa_bodies, soa_contacts, ps);
+      build_soa(soa_bodies, soa_contacts, ps, rows);
+      solve_scalar_soa(soa_bodies, soa_contacts, rows, ps);
+    }
+
+    const double diff = max_abs_diff(baseline_bodies, soa_bodies);
+    assert(diff <= 5e-4 && "Parity (approx): SoA within tolerance after multiple steps");
+    const double cone = cone_consistency(soa_contacts);
+    assert(cone >= 0.999 && "SoA friction cone violations detected");
+    const double energy = kinetic_energy(soa_bodies);
+    assert(std::isfinite(energy) && "Energy should remain finite");
   }
 
   return 0;
