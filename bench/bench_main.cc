@@ -21,7 +21,9 @@
 #include "soa_pack.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +36,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -46,6 +49,7 @@ struct BenchmarkResult {
   std::size_t bodies = 0;
   std::size_t contacts = 0;
   std::size_t joints = 0;
+  int tile_size = 0;
   double ms_per_step = 0.0;
   double drift_max = 0.0;
   double penetration_linf = 0.0;
@@ -57,6 +61,7 @@ struct BenchmarkResult {
   bool has_soa_timings = false;
   SoaTimingBreakdown soa_timings;
   std::string soa_debug_summary;
+  std::string commit_sha;
 };
 
 std::vector<BenchmarkResult> g_results;
@@ -122,6 +127,9 @@ struct CliOptions {
   double dt = 1.0 / 60.0;
   int threads = 1;
   std::string csv_path = "results/results.csv";
+  std::vector<int> sizes;
+  std::vector<std::string> solver_list;
+  std::vector<int> tile_sizes;
 };
 
 int parse_int_default(const std::string& value, int fallback) {
@@ -138,6 +146,71 @@ double parse_double_default(const std::string& value, double fallback) {
   } catch (...) {
     return fallback;
   }
+}
+
+std::string trim_copy(const std::string& value) {
+  const auto begin = value.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return std::string();
+  }
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(begin, end - begin + 1);
+}
+
+std::vector<std::string> split_csv(const std::string& value) {
+  std::vector<std::string> tokens;
+  std::stringstream ss(value);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    const std::string trimmed = trim_copy(item);
+    if (!trimmed.empty()) {
+      tokens.push_back(trimmed);
+    }
+  }
+  return tokens;
+}
+
+std::string current_commit_sha() {
+  static std::string cached;
+  static bool initialized = false;
+  if (initialized) {
+    return cached;
+  }
+  initialized = true;
+  if (const char* env = std::getenv("GITHUB_SHA")) {
+    const std::string sha_env = trim_copy(env);
+    if (!sha_env.empty()) {
+      cached = sha_env.substr(0, std::min<std::size_t>(sha_env.size(), 12));
+    }
+  }
+  if (!cached.empty()) {
+    return cached;
+  }
+  std::array<char, 64> buffer{};
+  if (FILE* pipe = ::popen("git rev-parse --short HEAD", "r")) {
+    if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
+      cached = trim_copy(buffer.data());
+    }
+    ::pclose(pipe);
+  }
+  return cached;
+}
+
+std::string normalize_solver_name(std::string name) {
+  if (name == "scalar_cached") {
+    return "cached";
+  }
+  if (name == "scalar_soa" || name == "soa_simd" || name == "soa_mt") {
+    return "soa";
+  }
+  if (name == "scalar_soa_vectorized" || name == "soa_vec" ||
+      name == "soa_vectorized") {
+    return "soa_vectorized";
+  }
+  if (name == "baseline_vec") {
+    return "baseline";
+  }
+  return name;
 }
 
 bool make_scene_by_name(const std::string& name, Scene* scene) {
@@ -165,6 +238,36 @@ bool make_scene_by_name(const std::string& name, Scene* scene) {
   return true;
 }
 
+bool make_scene_with_size(const std::string& name,
+                          int size,
+                          Scene* scene,
+                          std::string* resolved_name) {
+  if (name == "spheres_cloud") {
+    const int count = (size > 0) ? size : 1024;
+    *scene = make_spheres_box_cloud(count);
+    if (resolved_name) {
+      *resolved_name = "spheres_cloud_" + std::to_string(count);
+    }
+    return true;
+  }
+  if (size > 0) {
+    const std::string sized = name + "_" + std::to_string(size);
+    if (make_scene_by_name(sized, scene)) {
+      if (resolved_name) {
+        *resolved_name = sized;
+      }
+      return true;
+    }
+  }
+  if (make_scene_by_name(name, scene)) {
+    if (resolved_name) {
+      *resolved_name = name;
+    }
+    return true;
+  }
+  return false;
+}
+
 CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthrough) {
   CliOptions opts;
   passthrough.push_back(argv[0]);
@@ -188,6 +291,27 @@ CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthro
     } else if (arg.rfind("--threads=", 0) == 0) {
       opts.run_cli = true;
       opts.threads = std::max(1, parse_int_default(arg.substr(10), opts.threads));
+    } else if (arg.rfind("--sizes=", 0) == 0) {
+      opts.run_cli = true;
+      opts.sizes.clear();
+      for (const std::string& token : split_csv(arg.substr(8))) {
+        const int value = parse_int_default(token, -1);
+        if (value > 0) {
+          opts.sizes.push_back(value);
+        }
+      }
+    } else if (arg.rfind("--solvers=", 0) == 0) {
+      opts.run_cli = true;
+      opts.solver_list = split_csv(arg.substr(10));
+    } else if (arg.rfind("--tile-sizes=", 0) == 0) {
+      opts.run_cli = true;
+      opts.tile_sizes.clear();
+      for (const std::string& token : split_csv(arg.substr(13))) {
+        const int value = parse_int_default(token, -1);
+        if (value > 0) {
+          opts.tile_sizes.push_back(value);
+        }
+      }
     } else if (arg.rfind("--csv=", 0) == 0) {
       opts.csv_path = arg.substr(6);
     } else if (arg == "--benchmark") {
@@ -267,23 +391,13 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
                                                int iterations,
                                                int steps,
                                                double dt,
-                                               int threads) {
+                                               int threads,
+                                               int tile_size_override) {
   const int safe_iterations = std::max(1, iterations);
   const int safe_steps = std::max(1, steps);
   const int safe_threads = std::max(1, threads);
 
-  std::string normalized = solver_name;
-  if (normalized == "scalar_cached") {
-    normalized = "cached";
-  } else if (normalized == "scalar_soa" || normalized == "soa_simd" ||
-             normalized == "soa_mt") {
-    normalized = "soa";
-  } else if (normalized == "scalar_soa_vectorized" || normalized == "soa_vec" ||
-             normalized == "soa_vectorized") {
-    normalized = "soa_vectorized";
-  } else if (normalized == "baseline_vec") {
-    normalized = "baseline";
-  }
+  std::string normalized = normalize_solver_name(solver_name);
 
   std::vector<RigidBody> bodies = base_scene.bodies;
   std::vector<Contact> contacts = base_scene.contacts;
@@ -323,6 +437,10 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     params.dt = dt;
     params.use_threads = (safe_threads > 1);
     params.thread_count = safe_threads;
+    if (tile_size_override > 0) {
+      params.tile_size = tile_size_override;
+      params.max_contacts_per_tile = tile_size_override;
+    }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result =
         run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
@@ -333,6 +451,10 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     params.dt = dt;
     params.use_threads = (safe_threads > 1);
     params.thread_count = safe_threads;
+    if (tile_size_override > 0) {
+      params.tile_size = tile_size_override;
+      params.max_contacts_per_tile = tile_size_override;
+    }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result = run_soa_vectorized_result(scene_name, base_scene,
                                                        params, safe_steps, -1.0);
@@ -366,6 +488,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   result.joint_Linf = joint_error_Linf(joints);
   result.simd = simd_used;
   result.threads = threads_used;
+  result.tile_size = (tile_size_override > 0) ? tile_size_override : 0;
+  result.commit_sha = current_commit_sha();
   return result;
 }
 
@@ -410,7 +534,7 @@ void run_default_suite(const std::string& csv_path) {
       continue;
     }
     auto maybe = run_solver_case(qc.solver, qc.scene, scene, qc.iterations,
-                                 qc.steps, kDefaultDt, 1);
+                                 qc.steps, kDefaultDt, 1, -1);
     if (!maybe.has_value()) {
       continue;
     }
@@ -427,37 +551,94 @@ void run_default_suite(const std::string& csv_path) {
 }
 
 bool run_cli_mode(const CliOptions& opts) {
-  Scene base_scene;
-  if (!make_scene_by_name(opts.scene, &base_scene)) {
-    std::cerr << "Unknown scene: " << opts.scene << "\n";
-    return false;
-  }
-
   const int steps = std::max(1, opts.steps);
   const int iterations = std::max(1, opts.iterations);
   const double dt = opts.dt;
   const int threads = std::max(1, opts.threads);
 
   std::vector<std::string> solvers;
-  if (opts.solver == "auto") {
+  if (!opts.solver_list.empty()) {
+    solvers = opts.solver_list;
+  } else if (opts.solver == "auto") {
     solvers = {"baseline", "cached", "soa", "soa_vectorized"};
   } else {
     solvers.push_back(opts.solver);
   }
 
-  std::vector<BenchmarkResult> results;
-  results.reserve(solvers.size());
+  if (solvers.empty()) {
+    std::cerr << "No solvers specified.\n";
+    return false;
+  }
 
-  for (const std::string& solver_name : solvers) {
-    auto maybe =
-        run_solver_case(solver_name, opts.scene, base_scene, iterations, steps,
-                        dt, threads);
-    if (!maybe.has_value()) {
-      std::cerr << "Skipping solver: " << solver_name << "\n";
-      continue;
+  struct SceneRequest {
+    std::string name;
+    Scene scene;
+  };
+
+  std::vector<SceneRequest> scenes;
+  if (!opts.sizes.empty()) {
+    for (int size : opts.sizes) {
+      Scene scene;
+      std::string label;
+      if (!make_scene_with_size(opts.scene, size, &scene, &label)) {
+        std::cerr << "Skipping unknown scene: " << opts.scene << " size=" << size
+                  << "\n";
+        continue;
+      }
+      scenes.push_back({label, std::move(scene)});
     }
-    results.push_back(*maybe);
-    print_run_summary(results.back());
+  } else {
+    Scene scene;
+    std::string label;
+    if (!make_scene_with_size(opts.scene, -1, &scene, &label)) {
+      std::cerr << "Unknown scene: " << opts.scene << "\n";
+      return false;
+    }
+    scenes.push_back({label, std::move(scene)});
+  }
+
+  if (scenes.empty()) {
+    std::cerr << "No valid scenes to run.\n";
+    return false;
+  }
+
+  std::vector<int> tile_sizes = opts.tile_sizes;
+  if (tile_sizes.empty()) {
+    tile_sizes.push_back(-1);
+  }
+
+  std::vector<BenchmarkResult> results;
+
+  for (const SceneRequest& req : scenes) {
+    for (const std::string& solver_name : solvers) {
+      const std::string normalized = normalize_solver_name(solver_name);
+      const bool uses_tiles =
+          (normalized == "soa" || normalized == "soa_vectorized");
+      if (uses_tiles) {
+        for (int tile_size : tile_sizes) {
+          const int override_tile = (tile_size > 0) ? tile_size : -1;
+          auto maybe = run_solver_case(solver_name, req.name, req.scene, iterations,
+                                       steps, dt, threads, override_tile);
+          if (!maybe.has_value()) {
+            std::cerr << "Skipping solver: " << solver_name
+                      << " for scene " << req.name << "\n";
+            continue;
+          }
+          results.push_back(*maybe);
+          print_run_summary(results.back());
+        }
+      } else {
+        auto maybe = run_solver_case(solver_name, req.name, req.scene, iterations,
+                                     steps, dt, threads, -1);
+        if (!maybe.has_value()) {
+          std::cerr << "Skipping solver: " << solver_name
+                    << " for scene " << req.name << "\n";
+          continue;
+        }
+        results.push_back(*maybe);
+        print_run_summary(results.back());
+      }
+    }
   }
 
   if (results.empty()) {
@@ -505,6 +686,8 @@ BenchmarkResult run_baseline_result(const std::string& scene_name,
   result.joint_Linf = joint_error_Linf(base_scene.joints);
   result.simd = false;
   result.threads = 1;
+  result.tile_size = 0;
+  result.commit_sha = current_commit_sha();
   return result;
 }
 
@@ -540,6 +723,8 @@ BenchmarkResult run_cached_result(const std::string& scene_name,
   result.joint_Linf = joint_error_Linf(joints);
   result.simd = false;
   result.threads = 1;
+  result.tile_size = 0;
+  result.commit_sha = current_commit_sha();
   return result;
 }
 
@@ -1375,6 +1560,8 @@ BenchmarkResult run_soa_variant_result(const std::string& scene_name,
   result.joint_Linf = joint_error_Linf(joints);
   result.simd = params.use_simd;
   result.threads = params.use_threads ? std::max(1, params.thread_count) : 1;
+  result.tile_size = params.tile_size;
+  result.commit_sha = current_commit_sha();
   const double derived_ms = (steps > 0)
                                 ? (total_timings.total_step_ms / static_cast<double>(steps))
                                 : 0.0;
@@ -1453,18 +1640,17 @@ void write_results_csv() {
   if (needs_header) {
     out << benchcsv::kHeader << '\n';
   }
+  out << std::setprecision(12);
   for (const BenchmarkResult& r : g_results) {
     out << r.scene << ',' << r.solver << ',' << r.iterations << ',' << r.steps << ','
-        << r.bodies << ',' << r.contacts << ',' << r.joints << ',' << r.ms_per_step
-        << ',' << r.drift_max << ',' << r.penetration_linf << ',' << r.energy_drift
-        << ',' << r.cone_consistency << ',' << (r.simd ? 1 : 0) << ',' << r.threads
-        << ',' << r.soa_timings.contact_prep_ms << ',' << r.soa_timings.row_build_ms
-        << ',' << r.soa_timings.joint_distance_build_ms << ','
-        << r.soa_timings.joint_pack_ms << ',' << r.soa_timings.solver_total_ms << ','
-        << r.soa_timings.solver_warmstart_ms << ','
-        << r.soa_timings.solver_iterations_ms << ','
-        << r.soa_timings.solver_integrate_ms << ',' << r.soa_timings.scatter_ms << ','
-        << r.soa_timings.total_step_ms << '\n';
+        << r.bodies << ',' << r.contacts << ',' << r.joints << ',' << r.tile_size
+        << ',' << r.ms_per_step << ',' << r.drift_max << ',' << r.penetration_linf
+        << ',' << r.energy_drift << ',' << r.cone_consistency << ','
+        << (r.simd ? 1 : 0) << ',' << r.threads << ',';
+    if (!r.commit_sha.empty()) {
+      out << r.commit_sha;
+    }
+    out << '\n';
   }
 }
 

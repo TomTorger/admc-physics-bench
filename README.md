@@ -7,6 +7,32 @@ This repository is a compact, self-contained lab for testing how far you can pus
 
 ---
 
+## 📈 Performance (auto-updated by CI)
+
+The charts below are regenerated on each push to `main` by the `bench-and-plot` workflow.
+They show **ms/step** vs **scene size** (log–log) and **speedup vs baseline** for the scalar-cached and SoA solvers.
+
+<p align="center">
+  <img src="docs/assets/perf_scaling.svg" alt="Performance scaling (ms/step)" width="85%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/perf_scaling_speedup.svg" alt="Speedup vs baseline" width="85%">
+</p>
+
+**Reproduce locally:**
+```bash
+cmake -S . -B build -G Ninja -DADMC_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j
+mkdir -p results
+build/bench/bench_main --scene spheres_cloud --sizes 1024,2048,4096,8192 \
+  --iters 10 --steps 30 --solvers baseline,cached,soa --tile-sizes 64,128,256 \
+  --csv results/spheres_cloud.csv
+python3 tools/plot_perf.py --inputs results/*.csv --out docs/assets/perf_scaling.svg
+```
+
+---
+
 ## Why this project exists
 
 Modern physics engines typically resolve contacts as rows: **one scalar along a chosen direction** (normal or tangent) per constraint. Framing conservation “**in any direction**” lets us:
@@ -161,8 +187,9 @@ The benchmark writes these (plus timing/size fields) to CSV.
 ### CSV columns (typical)
 
 ```
-scene, solver, iterations, N_bodies, N_contacts, (N_joints),
-ms_per_step, drift_max, Linf_penetration, energy_drift, cone_consistency
+scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,tile_size,
+ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,
+simd,threads,commit_sha
 ```
 
 ---
@@ -172,24 +199,6 @@ ms_per_step, drift_max, Linf_penetration, energy_drift, cone_consistency
 * Fixed iteration counts, fixed scene seeds, and stable memory orderings are used.
 * Warm-starts are deterministic across runs; no threading or atomics in baseline benches.
 * Tests assert tight tolerances for elastic invariants and cone consistency.
-
----
-
-## Typical results (placeholder)
-
-> Replace with your data after running the bench scripts.
-
-| Scene              | Solver         | iters | ms/step | drift_max (↓) | Linf (↓) | Cone ok (↑) |
-| ------------------ | -------------- | :---: | ------: | ------------: | -------: | ----------: |
-| spheres_cloud_4096 | Baseline (AoS) |   10  |    12.3 |       1.2e-10 |   2.1e-3 |         n/a |
-|                    | ScalarCached   |   10  |     8.1 |       1.3e-10 |   2.0e-3 |        1.00 |
-|                    | SoA            |   10  |     5.4 |       1.3e-10 |   2.0e-3 |        1.00 |
-
-> Interpretations:
->
-> * **SoA** reduces per-step time via better memory layout & scalar rows.
-> * In elastic/no-friction cases drift should be at machine epsilon.
-> * With friction/restitution/ERP, energy drift is expected (controlled).
 
 ---
 

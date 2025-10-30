@@ -2,8 +2,74 @@
 
 #include "math.hpp"
 
-#include <vector>
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <new>
+#include <vector>
+#if defined(_MSC_VER)
+#include <malloc.h>
+#endif
+
+template <typename T, std::size_t Alignment>
+struct AlignedAllocator {
+  using value_type = T;
+
+  AlignedAllocator() noexcept = default;
+
+  template <class U>
+  constexpr AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+
+  [[nodiscard]] T* allocate(std::size_t n) {
+    if (n == 0) {
+      return nullptr;
+    }
+#if defined(_MSC_VER)
+    void* ptr = _aligned_malloc(n * sizeof(T), Alignment);
+    if (!ptr) {
+      throw std::bad_alloc();
+    }
+#else
+    void* ptr = nullptr;
+    const int err = posix_memalign(&ptr, Alignment, n * sizeof(T));
+    if (err != 0) {
+      throw std::bad_alloc();
+    }
+#endif
+    return static_cast<T*>(ptr);
+  }
+
+  void deallocate(T* p, std::size_t) noexcept {
+    if (!p) {
+      return;
+    }
+#if defined(_MSC_VER)
+    _aligned_free(p);
+#else
+    std::free(p);
+#endif
+  }
+
+  template <typename U>
+  struct rebind {
+    using other = AlignedAllocator<U, Alignment>;
+  };
+};
+
+template <typename T, typename U, std::size_t Alignment>
+bool operator==(const AlignedAllocator<T, Alignment>&,
+                const AlignedAllocator<U, Alignment>&) noexcept {
+  return true;
+}
+
+template <typename T, typename U, std::size_t Alignment>
+bool operator!=(const AlignedAllocator<T, Alignment>&,
+                const AlignedAllocator<U, Alignment>&) noexcept {
+  return false;
+}
+
+template <typename T>
+using SoaAlignedVector = std::vector<T, AlignedAllocator<T, 64>>;
 
 using math::Mat3;
 using math::Quat;
@@ -60,6 +126,8 @@ struct Contact {
   Vec3 TWt1_b;
   Vec3 TWt2_a;
   Vec3 TWt2_b;
+  Vec3 prev_t1;
+  Vec3 prev_t2;
   double e = 0.0;
   double mu = 0.0;
   double bias = 0.0;
@@ -85,41 +153,43 @@ struct RowSOA {
   std::vector<int> b;
 
   // Contact frames (unit vectors)
-  std::vector<double> nx, ny, nz;
-  std::vector<double> t1x, t1y, t1z;
-  std::vector<double> t2x, t2y, t2z;
+  SoaAlignedVector<double> nx, ny, nz;
+  SoaAlignedVector<double> t1x, t1y, t1z;
+  SoaAlignedVector<double> t2x, t2y, t2z;
 
   // Offsets from center of mass to contact point
-  std::vector<double> rax, ray, raz;
-  std::vector<double> rbx, rby, rbz;
+  SoaAlignedVector<double> rax, ray, raz;
+  SoaAlignedVector<double> rbx, rby, rbz;
 
   // Cross terms r x d
-  std::vector<double> raxn_x, raxn_y, raxn_z;
-  std::vector<double> rbxn_x, rbxn_y, rbxn_z;
-  std::vector<double> raxt1_x, raxt1_y, raxt1_z;
-  std::vector<double> rbxt1_x, rbxt1_y, rbxt1_z;
-  std::vector<double> raxt2_x, raxt2_y, raxt2_z;
-  std::vector<double> rbxt2_x, rbxt2_y, rbxt2_z;
+  SoaAlignedVector<double> raxn_x, raxn_y, raxn_z;
+  SoaAlignedVector<double> rbxn_x, rbxn_y, rbxn_z;
+  SoaAlignedVector<double> raxt1_x, raxt1_y, raxt1_z;
+  SoaAlignedVector<double> rbxt1_x, rbxt1_y, rbxt1_z;
+  SoaAlignedVector<double> raxt2_x, raxt2_y, raxt2_z;
+  SoaAlignedVector<double> rbxt2_x, rbxt2_y, rbxt2_z;
 
   // Inertia-multiplied cross terms TW = I^-1 * (r x d)
-  std::vector<double> TWn_a_x, TWn_a_y, TWn_a_z;
-  std::vector<double> TWn_b_x, TWn_b_y, TWn_b_z;
-  std::vector<double> TWt1_a_x, TWt1_a_y, TWt1_a_z;
-  std::vector<double> TWt1_b_x, TWt1_b_y, TWt1_b_z;
-  std::vector<double> TWt2_a_x, TWt2_a_y, TWt2_a_z;
-  std::vector<double> TWt2_b_x, TWt2_b_y, TWt2_b_z;
+  SoaAlignedVector<double> TWn_a_x, TWn_a_y, TWn_a_z;
+  SoaAlignedVector<double> TWn_b_x, TWn_b_y, TWn_b_z;
+  SoaAlignedVector<double> TWt1_a_x, TWt1_a_y, TWt1_a_z;
+  SoaAlignedVector<double> TWt1_b_x, TWt1_b_y, TWt1_b_z;
+  SoaAlignedVector<double> TWt2_a_x, TWt2_a_y, TWt2_a_z;
+  SoaAlignedVector<double> TWt2_b_x, TWt2_b_y, TWt2_b_z;
 
   // Effective masses per direction
-  std::vector<double> k_n, k_t1, k_t2;
+  SoaAlignedVector<double> k_n, k_t1, k_t2;
   // Cached reciprocals avoid divisions inside the solver hot loop.
-  std::vector<double> inv_k_n, inv_k_t1, inv_k_t2;
+  SoaAlignedVector<double> inv_k_n, inv_k_t1, inv_k_t2;
 
   // Material / bias terms per contact
-  std::vector<double> mu, e, bias, bounce, C;
+  SoaAlignedVector<double> mu, e, bias, bounce, C;
 
   // Accumulated impulses (warm-start)
-  std::vector<double> jn, jt1, jt2;
+  SoaAlignedVector<double> jn, jt1, jt2;
 
+  std::vector<std::uint8_t> flags;
+  std::vector<std::uint8_t> types;
   std::vector<int> indices; //!< Mapping back to original contact indices.
 
   std::size_t size() const { return static_cast<std::size_t>(N); }
@@ -193,6 +263,8 @@ struct RowSOA {
     jn.clear();
     jt1.clear();
     jt2.clear();
+    flags.clear();
+    types.clear();
     indices.clear();
   }
 
@@ -264,6 +336,8 @@ struct RowSOA {
     jn.reserve(capacity);
     jt1.reserve(capacity);
     jt2.reserve(capacity);
+    flags.reserve(capacity);
+    types.reserve(capacity);
     indices.reserve(capacity);
   }
 };

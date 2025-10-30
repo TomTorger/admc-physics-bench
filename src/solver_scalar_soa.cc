@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <map>
+#include <numeric>
 #include <sstream>
 
 namespace {
@@ -11,7 +13,698 @@ using math::Vec3;
 using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
 
-constexpr double kStaticFrictionSpeedThreshold = 0.1;
+constexpr double kPi = 3.14159265358979323846264338327950288;
+constexpr double kWarmstartRotationCosThreshold =
+    std::cos(15.0 * kPi / 180.0);
+
+#if defined(_MSC_VER)
+#define ADMC_RESTRICT __restrict
+#else
+#define ADMC_RESTRICT __restrict__
+#endif
+
+enum RowFlags : std::uint8_t {
+  kRowHasFriction = 1u << 0,
+  kRowIsParticle = 1u << 1,
+};
+
+struct Tile {
+  std::vector<int> rows;
+};
+
+struct TileContactRef {
+  int row = -1;
+  int local_a = -1;
+  int local_b = -1;
+};
+
+struct LocalBodyState {
+  int body = -1;
+  Vec3 v;
+  Vec3 w;
+  double inv_mass = 0.0;
+};
+
+struct TileSolveScratch {
+  std::vector<int> body_ids;
+  std::vector<LocalBodyState> bodies;
+  std::vector<TileContactRef> contacts;
+  std::vector<int> normals_only;
+  std::vector<int> particles;
+  std::vector<int> frictional;
+
+  void clear() {
+    body_ids.clear();
+    bodies.clear();
+    contacts.clear();
+    normals_only.clear();
+    particles.clear();
+    frictional.clear();
+  }
+};
+
+int find_or_add_local_body(int body,
+                           std::vector<int>& local_ids,
+                           std::vector<LocalBodyState>& states,
+                           const std::vector<RigidBody>& bodies) {
+  for (std::size_t i = 0; i < local_ids.size(); ++i) {
+    if (local_ids[i] == body) {
+      return static_cast<int>(i);
+    }
+  }
+  LocalBodyState state;
+  state.body = body;
+  if (body >= 0 && body < static_cast<int>(bodies.size())) {
+    const RigidBody& rb = bodies[static_cast<std::size_t>(body)];
+    state.v = rb.v;
+    state.w = rb.w;
+    state.inv_mass = rb.invMass;
+  }
+  local_ids.push_back(body);
+  states.push_back(state);
+  return static_cast<int>(local_ids.size() - 1);
+}
+
+std::vector<Tile> build_tiles(const RowSOA& rows,
+                              std::size_t body_count,
+                              int tile_size) {
+  std::vector<Tile> tiles;
+  if (rows.N <= 0 || body_count == 0 || tile_size <= 0) {
+    return tiles;
+  }
+
+  std::vector<int> parent(body_count);
+  std::iota(parent.begin(), parent.end(), 0);
+  std::vector<int> rank(body_count, 0);
+
+  auto find_set = [&](int x) {
+    while (parent[x] != x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+
+  auto union_sets = [&](int a, int b) {
+    a = find_set(a);
+    b = find_set(b);
+    if (a == b) {
+      return;
+    }
+    if (rank[a] < rank[b]) {
+      parent[a] = b;
+    } else if (rank[a] > rank[b]) {
+      parent[b] = a;
+    } else {
+      parent[b] = a;
+      ++rank[a];
+    }
+  };
+
+  for (int i = 0; i < rows.N; ++i) {
+    const int a = rows.a[i];
+    const int b = rows.b[i];
+    if (a >= 0 && b >= 0 && a < static_cast<int>(body_count) &&
+        b < static_cast<int>(body_count)) {
+      union_sets(a, b);
+    }
+  }
+
+  std::map<int, std::vector<int>> islands;
+  for (int i = 0; i < rows.N; ++i) {
+    const int a = rows.a[i];
+    const int b = rows.b[i];
+    int root = -1;
+    if (a >= 0 && a < static_cast<int>(body_count)) {
+      root = find_set(a);
+    } else if (b >= 0 && b < static_cast<int>(body_count)) {
+      root = find_set(b);
+    }
+    if (root < 0) {
+      continue;
+    }
+    islands[root].push_back(i);
+  }
+
+  for (auto& entry : islands) {
+    auto& island_rows = entry.second;
+    std::stable_sort(island_rows.begin(), island_rows.end(),
+                     [&](int lhs, int rhs) {
+                       if (rows.a[lhs] != rows.a[rhs]) {
+                         return rows.a[lhs] < rows.a[rhs];
+                       }
+                       if (rows.b[lhs] != rows.b[rhs]) {
+                         return rows.b[lhs] < rows.b[rhs];
+                       }
+                       return lhs < rhs;
+                     });
+    for (std::size_t offset = 0; offset < island_rows.size();
+         offset += static_cast<std::size_t>(tile_size)) {
+      const std::size_t end =
+          std::min(island_rows.size(), offset + static_cast<std::size_t>(tile_size));
+      Tile tile;
+      tile.rows.assign(island_rows.begin() + static_cast<std::ptrdiff_t>(offset),
+                       island_rows.begin() + static_cast<std::ptrdiff_t>(end));
+      tiles.push_back(std::move(tile));
+    }
+  }
+
+  return tiles;
+}
+
+void scatter_tile(const TileSolveScratch& scratch,
+                  std::vector<RigidBody>& bodies) {
+  for (const LocalBodyState& state : scratch.bodies) {
+    if (state.body < 0 || state.body >= static_cast<int>(bodies.size())) {
+      continue;
+    }
+    RigidBody& body = bodies[static_cast<std::size_t>(state.body)];
+    body.v = state.v;
+    body.w = state.w;
+  }
+}
+
+struct TileWorkView {
+  TileSolveScratch* scratch = nullptr;
+  std::vector<RigidBody>* bodies = nullptr;
+  RowSOA* rows = nullptr;
+  SolverDebugInfo* debug = nullptr;
+};
+
+void stage_tile(TileWorkView& view, const Tile& tile) {
+  TileSolveScratch& scratch = *view.scratch;
+  scratch.clear();
+  scratch.body_ids.reserve(tile.rows.size() * 2);
+  scratch.bodies.reserve(tile.rows.size() * 2);
+  scratch.contacts.reserve(tile.rows.size());
+  scratch.normals_only.reserve(tile.rows.size());
+  scratch.particles.reserve(tile.rows.size());
+  scratch.frictional.reserve(tile.rows.size());
+
+  for (int row : tile.rows) {
+    const int a = view.rows->a[row];
+    const int b = view.rows->b[row];
+    if (a < 0 || b < 0 || a >= static_cast<int>(view.bodies->size()) ||
+        b >= static_cast<int>(view.bodies->size())) {
+      if (view.debug) {
+        ++view.debug->invalid_contact_indices;
+      }
+      continue;
+    }
+
+    const int local_a =
+        find_or_add_local_body(a, scratch.body_ids, scratch.bodies, *view.bodies);
+    const int local_b =
+        find_or_add_local_body(b, scratch.body_ids, scratch.bodies, *view.bodies);
+
+    TileContactRef ref;
+    ref.row = row;
+    ref.local_a = local_a;
+    ref.local_b = local_b;
+    scratch.contacts.push_back(ref);
+    const int contact_index = static_cast<int>(scratch.contacts.size() - 1);
+    const std::uint8_t flags = view.rows->flags[row];
+    if ((flags & kRowHasFriction) == 0) {
+      scratch.normals_only.push_back(contact_index);
+    } else if (flags & kRowIsParticle) {
+      scratch.particles.push_back(contact_index);
+    } else {
+      scratch.frictional.push_back(contact_index);
+    }
+  }
+}
+
+void solve_rows_normals_only(TileWorkView& view) {
+  TileSolveScratch& scratch = *view.scratch;
+  RowSOA& rows = *view.rows;
+  auto& contacts = scratch.contacts;
+  auto& bodies = scratch.bodies;
+  double* ADMC_RESTRICT jn = rows.jn.data();
+  double* ADMC_RESTRICT jt1 = rows.jt1.data();
+  double* ADMC_RESTRICT jt2 = rows.jt2.data();
+  const double* ADMC_RESTRICT nx = rows.nx.data();
+  const double* ADMC_RESTRICT ny = rows.ny.data();
+  const double* ADMC_RESTRICT nz = rows.nz.data();
+  const double* ADMC_RESTRICT bias = rows.bias.data();
+  const double* ADMC_RESTRICT bounce = rows.bounce.data();
+  const double* ADMC_RESTRICT inv_k_n = rows.inv_k_n.data();
+  const double* ADMC_RESTRICT raxn_x = rows.raxn_x.data();
+  const double* ADMC_RESTRICT raxn_y = rows.raxn_y.data();
+  const double* ADMC_RESTRICT raxn_z = rows.raxn_z.data();
+  const double* ADMC_RESTRICT rbxn_x = rows.rbxn_x.data();
+  const double* ADMC_RESTRICT rbxn_y = rows.rbxn_y.data();
+  const double* ADMC_RESTRICT rbxn_z = rows.rbxn_z.data();
+  const double* ADMC_RESTRICT TWn_a_x = rows.TWn_a_x.data();
+  const double* ADMC_RESTRICT TWn_a_y = rows.TWn_a_y.data();
+  const double* ADMC_RESTRICT TWn_a_z = rows.TWn_a_z.data();
+  const double* ADMC_RESTRICT TWn_b_x = rows.TWn_b_x.data();
+  const double* ADMC_RESTRICT TWn_b_y = rows.TWn_b_y.data();
+  const double* ADMC_RESTRICT TWn_b_z = rows.TWn_b_z.data();
+
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+  for (std::size_t idx = 0; idx < scratch.normals_only.size(); ++idx) {
+    const int contact_index = scratch.normals_only[idx];
+    if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
+      continue;
+    }
+    const TileContactRef& ref = contacts[static_cast<std::size_t>(contact_index)];
+    if (ref.local_a < 0 || ref.local_b < 0 ||
+        ref.local_a >= static_cast<int>(bodies.size()) ||
+        ref.local_b >= static_cast<int>(bodies.size())) {
+      continue;
+    }
+
+    LocalBodyState& A = bodies[static_cast<std::size_t>(ref.local_a)];
+    LocalBodyState& B = bodies[static_cast<std::size_t>(ref.local_b)];
+    const int row = ref.row;
+
+    double dvx = B.v.x - A.v.x;
+    double dvy = B.v.y - A.v.y;
+    double dvz = B.v.z - A.v.z;
+
+    double wAx = A.w.x;
+    double wAy = A.w.y;
+    double wAz = A.w.z;
+    double wBx = B.w.x;
+    double wBy = B.w.y;
+    double wBz = B.w.z;
+
+    const double wA_dot_raxn =
+        wAx * raxn_x[row] + wAy * raxn_y[row] + wAz * raxn_z[row];
+    const double wB_dot_rbxn =
+        wBx * rbxn_x[row] + wBy * rbxn_y[row] + wBz * rbxn_z[row];
+
+    const double v_rel_n =
+        nx[row] * dvx + ny[row] * dvy + nz[row] * dvz + wB_dot_rbxn - wA_dot_raxn;
+
+    const double rhs = -(v_rel_n + bias[row] - bounce[row]);
+    const double delta_jn = rhs * inv_k_n[row];
+    const double jn_old = jn[row];
+    double jn_candidate = jn_old + delta_jn;
+    if (jn_candidate < 0.0) {
+      if (view.debug) {
+        ++view.debug->normal_impulse_clamps;
+      }
+      jn_candidate = 0.0;
+    }
+    jn[row] = jn_candidate;
+    jt1[row] = 0.0;
+    jt2[row] = 0.0;
+
+    const double applied_n = jn_candidate - jn_old;
+    if (std::fabs(applied_n) <= math::kEps) {
+      continue;
+    }
+
+    const double impulse_x = nx[row] * applied_n;
+    const double impulse_y = ny[row] * applied_n;
+    const double impulse_z = nz[row] * applied_n;
+    const double inv_mass_sum = A.inv_mass + B.inv_mass;
+
+    A.v.x -= impulse_x * A.inv_mass;
+    A.v.y -= impulse_y * A.inv_mass;
+    A.v.z -= impulse_z * A.inv_mass;
+    B.v.x += impulse_x * B.inv_mass;
+    B.v.y += impulse_y * B.inv_mass;
+    B.v.z += impulse_z * B.inv_mass;
+
+    dvx += impulse_x * inv_mass_sum;
+    dvy += impulse_y * inv_mass_sum;
+    dvz += impulse_z * inv_mass_sum;
+
+    const double TWn_ax = TWn_a_x[row];
+    const double TWn_ay = TWn_a_y[row];
+    const double TWn_az = TWn_a_z[row];
+    const double TWn_bx = TWn_b_x[row];
+    const double TWn_by = TWn_b_y[row];
+    const double TWn_bz = TWn_b_z[row];
+
+    A.w.x -= applied_n * TWn_ax;
+    A.w.y -= applied_n * TWn_ay;
+    A.w.z -= applied_n * TWn_az;
+    B.w.x += applied_n * TWn_bx;
+    B.w.y += applied_n * TWn_by;
+    B.w.z += applied_n * TWn_bz;
+
+    (void)dvx;
+    (void)dvy;
+    (void)dvz;
+  }
+}
+
+void solve_rows_particles(TileWorkView& view) {
+  TileSolveScratch& scratch = *view.scratch;
+  RowSOA& rows = *view.rows;
+  auto& contacts = scratch.contacts;
+  auto& bodies = scratch.bodies;
+  double* ADMC_RESTRICT jn = rows.jn.data();
+  double* ADMC_RESTRICT jt1 = rows.jt1.data();
+  double* ADMC_RESTRICT jt2 = rows.jt2.data();
+  const double* ADMC_RESTRICT nx = rows.nx.data();
+  const double* ADMC_RESTRICT ny = rows.ny.data();
+  const double* ADMC_RESTRICT nz = rows.nz.data();
+  const double* ADMC_RESTRICT t1x = rows.t1x.data();
+  const double* ADMC_RESTRICT t1y = rows.t1y.data();
+  const double* ADMC_RESTRICT t1z = rows.t1z.data();
+  const double* ADMC_RESTRICT t2x = rows.t2x.data();
+  const double* ADMC_RESTRICT t2y = rows.t2y.data();
+  const double* ADMC_RESTRICT t2z = rows.t2z.data();
+  const double* ADMC_RESTRICT bias = rows.bias.data();
+  const double* ADMC_RESTRICT bounce = rows.bounce.data();
+  const double* ADMC_RESTRICT inv_k_n = rows.inv_k_n.data();
+  const double* ADMC_RESTRICT inv_k_t1 = rows.inv_k_t1.data();
+  const double* ADMC_RESTRICT inv_k_t2 = rows.inv_k_t2.data();
+  const double* ADMC_RESTRICT mu = rows.mu.data();
+
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+  for (std::size_t idx = 0; idx < scratch.particles.size(); ++idx) {
+    const int contact_index = scratch.particles[idx];
+    if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
+      continue;
+    }
+    const TileContactRef& ref = contacts[static_cast<std::size_t>(contact_index)];
+    if (ref.local_a < 0 || ref.local_b < 0 ||
+        ref.local_a >= static_cast<int>(bodies.size()) ||
+        ref.local_b >= static_cast<int>(bodies.size())) {
+      continue;
+    }
+
+    LocalBodyState& A = bodies[static_cast<std::size_t>(ref.local_a)];
+    LocalBodyState& B = bodies[static_cast<std::size_t>(ref.local_b)];
+    const int row = ref.row;
+
+    const double dvx = B.v.x - A.v.x;
+    const double dvy = B.v.y - A.v.y;
+    const double dvz = B.v.z - A.v.z;
+
+    const double v_rel_n = nx[row] * dvx + ny[row] * dvy + nz[row] * dvz;
+    const double rhs = -(v_rel_n + bias[row] - bounce[row]);
+    const double delta_jn = rhs * inv_k_n[row];
+    const double jn_old = jn[row];
+    double jn_candidate = jn_old + delta_jn;
+    if (jn_candidate < 0.0) {
+      if (view.debug) {
+        ++view.debug->normal_impulse_clamps;
+      }
+      jn_candidate = 0.0;
+    }
+    jn[row] = jn_candidate;
+
+    const double applied_n = jn_candidate - jn_old;
+    if (std::fabs(applied_n) > math::kEps) {
+      const double impulse_x = nx[row] * applied_n;
+      const double impulse_y = ny[row] * applied_n;
+      const double impulse_z = nz[row] * applied_n;
+      A.v.x -= impulse_x * A.inv_mass;
+      A.v.y -= impulse_y * A.inv_mass;
+      A.v.z -= impulse_z * A.inv_mass;
+      B.v.x += impulse_x * B.inv_mass;
+      B.v.y += impulse_y * B.inv_mass;
+      B.v.z += impulse_z * B.inv_mass;
+    }
+
+    if (mu[row] <= math::kEps) {
+      jt1[row] = 0.0;
+      jt2[row] = 0.0;
+      continue;
+    }
+
+    const double v_rel_t1 = t1x[row] * dvx + t1y[row] * dvy + t1z[row] * dvz;
+    const double v_rel_t2 = t2x[row] * dvx + t2y[row] * dvy + t2z[row] * dvz;
+    double jt1_candidate = jt1[row] + (-v_rel_t1) * inv_k_t1[row];
+    double jt2_candidate = jt2[row] + (-v_rel_t2) * inv_k_t2[row];
+
+    const double friction_max = mu[row] * std::max(jn[row], 0.0);
+    const double friction_max_sq = friction_max * friction_max;
+    const double jt_mag_sq =
+        jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
+    double scale = 1.0;
+    if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
+      const double jt_mag = std::sqrt(jt_mag_sq);
+      scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+      if (view.debug) {
+        ++view.debug->tangent_projections;
+      }
+    }
+
+    jt1_candidate *= scale;
+    jt2_candidate *= scale;
+    const double delta_jt1 = jt1_candidate - jt1[row];
+    const double delta_jt2 = jt2_candidate - jt2[row];
+    jt1[row] = jt1_candidate;
+    jt2[row] = jt2_candidate;
+
+    if (std::fabs(delta_jt1) <= math::kEps &&
+        std::fabs(delta_jt2) <= math::kEps) {
+      continue;
+    }
+
+    const double impulse_x = delta_jt1 * t1x[row] + delta_jt2 * t2x[row];
+    const double impulse_y = delta_jt1 * t1y[row] + delta_jt2 * t2y[row];
+    const double impulse_z = delta_jt1 * t1z[row] + delta_jt2 * t2z[row];
+
+    A.v.x -= impulse_x * A.inv_mass;
+    A.v.y -= impulse_y * A.inv_mass;
+    A.v.z -= impulse_z * A.inv_mass;
+    B.v.x += impulse_x * B.inv_mass;
+    B.v.y += impulse_y * B.inv_mass;
+    B.v.z += impulse_z * B.inv_mass;
+  }
+}
+
+void solve_rows_frictional(TileWorkView& view) {
+  TileSolveScratch& scratch = *view.scratch;
+  RowSOA& rows = *view.rows;
+  auto& contacts = scratch.contacts;
+  auto& bodies = scratch.bodies;
+  double* ADMC_RESTRICT jn = rows.jn.data();
+  double* ADMC_RESTRICT jt1 = rows.jt1.data();
+  double* ADMC_RESTRICT jt2 = rows.jt2.data();
+  const double* ADMC_RESTRICT nx = rows.nx.data();
+  const double* ADMC_RESTRICT ny = rows.ny.data();
+  const double* ADMC_RESTRICT nz = rows.nz.data();
+  const double* ADMC_RESTRICT t1x = rows.t1x.data();
+  const double* ADMC_RESTRICT t1y = rows.t1y.data();
+  const double* ADMC_RESTRICT t1z = rows.t1z.data();
+  const double* ADMC_RESTRICT t2x = rows.t2x.data();
+  const double* ADMC_RESTRICT t2y = rows.t2y.data();
+  const double* ADMC_RESTRICT t2z = rows.t2z.data();
+  const double* ADMC_RESTRICT bias = rows.bias.data();
+  const double* ADMC_RESTRICT bounce = rows.bounce.data();
+  const double* ADMC_RESTRICT inv_k_n = rows.inv_k_n.data();
+  const double* ADMC_RESTRICT inv_k_t1 = rows.inv_k_t1.data();
+  const double* ADMC_RESTRICT inv_k_t2 = rows.inv_k_t2.data();
+  const double* ADMC_RESTRICT mu = rows.mu.data();
+  const double* ADMC_RESTRICT raxn_x = rows.raxn_x.data();
+  const double* ADMC_RESTRICT raxn_y = rows.raxn_y.data();
+  const double* ADMC_RESTRICT raxn_z = rows.raxn_z.data();
+  const double* ADMC_RESTRICT rbxn_x = rows.rbxn_x.data();
+  const double* ADMC_RESTRICT rbxn_y = rows.rbxn_y.data();
+  const double* ADMC_RESTRICT rbxn_z = rows.rbxn_z.data();
+  const double* ADMC_RESTRICT raxt1_x = rows.raxt1_x.data();
+  const double* ADMC_RESTRICT raxt1_y = rows.raxt1_y.data();
+  const double* ADMC_RESTRICT raxt1_z = rows.raxt1_z.data();
+  const double* ADMC_RESTRICT rbxt1_x = rows.rbxt1_x.data();
+  const double* ADMC_RESTRICT rbxt1_y = rows.rbxt1_y.data();
+  const double* ADMC_RESTRICT rbxt1_z = rows.rbxt1_z.data();
+  const double* ADMC_RESTRICT raxt2_x = rows.raxt2_x.data();
+  const double* ADMC_RESTRICT raxt2_y = rows.raxt2_y.data();
+  const double* ADMC_RESTRICT raxt2_z = rows.raxt2_z.data();
+  const double* ADMC_RESTRICT rbxt2_x = rows.rbxt2_x.data();
+  const double* ADMC_RESTRICT rbxt2_y = rows.rbxt2_y.data();
+  const double* ADMC_RESTRICT rbxt2_z = rows.rbxt2_z.data();
+  const double* ADMC_RESTRICT TWn_a_x = rows.TWn_a_x.data();
+  const double* ADMC_RESTRICT TWn_a_y = rows.TWn_a_y.data();
+  const double* ADMC_RESTRICT TWn_a_z = rows.TWn_a_z.data();
+  const double* ADMC_RESTRICT TWn_b_x = rows.TWn_b_x.data();
+  const double* ADMC_RESTRICT TWn_b_y = rows.TWn_b_y.data();
+  const double* ADMC_RESTRICT TWn_b_z = rows.TWn_b_z.data();
+  const double* ADMC_RESTRICT TWt1_a_x = rows.TWt1_a_x.data();
+  const double* ADMC_RESTRICT TWt1_a_y = rows.TWt1_a_y.data();
+  const double* ADMC_RESTRICT TWt1_a_z = rows.TWt1_a_z.data();
+  const double* ADMC_RESTRICT TWt1_b_x = rows.TWt1_b_x.data();
+  const double* ADMC_RESTRICT TWt1_b_y = rows.TWt1_b_y.data();
+  const double* ADMC_RESTRICT TWt1_b_z = rows.TWt1_b_z.data();
+  const double* ADMC_RESTRICT TWt2_a_x = rows.TWt2_a_x.data();
+  const double* ADMC_RESTRICT TWt2_a_y = rows.TWt2_a_y.data();
+  const double* ADMC_RESTRICT TWt2_a_z = rows.TWt2_a_z.data();
+  const double* ADMC_RESTRICT TWt2_b_x = rows.TWt2_b_x.data();
+  const double* ADMC_RESTRICT TWt2_b_y = rows.TWt2_b_y.data();
+  const double* ADMC_RESTRICT TWt2_b_z = rows.TWt2_b_z.data();
+
+#if defined(__clang__)
+#pragma clang loop vectorize(enable)
+#endif
+  for (std::size_t idx = 0; idx < scratch.frictional.size(); ++idx) {
+    const int contact_index = scratch.frictional[idx];
+    if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
+      continue;
+    }
+    const TileContactRef& ref = contacts[static_cast<std::size_t>(contact_index)];
+    if (ref.local_a < 0 || ref.local_b < 0 ||
+        ref.local_a >= static_cast<int>(bodies.size()) ||
+        ref.local_b >= static_cast<int>(bodies.size())) {
+      continue;
+    }
+
+    LocalBodyState& A = bodies[static_cast<std::size_t>(ref.local_a)];
+    LocalBodyState& B = bodies[static_cast<std::size_t>(ref.local_b)];
+    const int row = ref.row;
+
+    double dvx = B.v.x - A.v.x;
+    double dvy = B.v.y - A.v.y;
+    double dvz = B.v.z - A.v.z;
+
+    double wAx = A.w.x;
+    double wAy = A.w.y;
+    double wAz = A.w.z;
+    double wBx = B.w.x;
+    double wBy = B.w.y;
+    double wBz = B.w.z;
+
+    const double wA_dot_raxn =
+        wAx * raxn_x[row] + wAy * raxn_y[row] + wAz * raxn_z[row];
+    const double wB_dot_rbxn =
+        wBx * rbxn_x[row] + wBy * rbxn_y[row] + wBz * rbxn_z[row];
+
+    const double v_rel_n =
+        nx[row] * dvx + ny[row] * dvy + nz[row] * dvz + wB_dot_rbxn - wA_dot_raxn;
+
+    const double rhs = -(v_rel_n + bias[row] - bounce[row]);
+    const double delta_jn = rhs * inv_k_n[row];
+    const double jn_old = jn[row];
+    double jn_candidate = jn_old + delta_jn;
+    if (jn_candidate < 0.0) {
+      if (view.debug) {
+        ++view.debug->normal_impulse_clamps;
+      }
+      jn_candidate = 0.0;
+    }
+    jn[row] = jn_candidate;
+
+    const double applied_n = jn_candidate - jn_old;
+    if (std::fabs(applied_n) > math::kEps) {
+      const double impulse_x = nx[row] * applied_n;
+      const double impulse_y = ny[row] * applied_n;
+      const double impulse_z = nz[row] * applied_n;
+      const double inv_mass_sum = A.inv_mass + B.inv_mass;
+
+      A.v.x -= impulse_x * A.inv_mass;
+      A.v.y -= impulse_y * A.inv_mass;
+      A.v.z -= impulse_z * A.inv_mass;
+      B.v.x += impulse_x * B.inv_mass;
+      B.v.y += impulse_y * B.inv_mass;
+      B.v.z += impulse_z * B.inv_mass;
+
+      dvx += impulse_x * inv_mass_sum;
+      dvy += impulse_y * inv_mass_sum;
+      dvz += impulse_z * inv_mass_sum;
+
+      const double TWn_ax = TWn_a_x[row];
+      const double TWn_ay = TWn_a_y[row];
+      const double TWn_az = TWn_a_z[row];
+      const double TWn_bx = TWn_b_x[row];
+      const double TWn_by = TWn_b_y[row];
+      const double TWn_bz = TWn_b_z[row];
+
+      A.w.x -= applied_n * TWn_ax;
+      A.w.y -= applied_n * TWn_ay;
+      A.w.z -= applied_n * TWn_az;
+      B.w.x += applied_n * TWn_bx;
+      B.w.y += applied_n * TWn_by;
+      B.w.z += applied_n * TWn_bz;
+
+      wAx -= applied_n * TWn_ax;
+      wAy -= applied_n * TWn_ay;
+      wAz -= applied_n * TWn_az;
+      wBx += applied_n * TWn_bx;
+      wBy += applied_n * TWn_by;
+      wBz += applied_n * TWn_bz;
+    }
+
+    if (mu[row] <= math::kEps) {
+      jt1[row] = 0.0;
+      jt2[row] = 0.0;
+      continue;
+    }
+
+    const double wA_dot_raxt1 =
+        wAx * raxt1_x[row] + wAy * raxt1_y[row] + wAz * raxt1_z[row];
+    const double wB_dot_rbxt1 =
+        wBx * rbxt1_x[row] + wBy * rbxt1_y[row] + wBz * rbxt1_z[row];
+    const double wA_dot_raxt2 =
+        wAx * raxt2_x[row] + wAy * raxt2_y[row] + wAz * raxt2_z[row];
+    const double wB_dot_rbxt2 =
+        wBx * rbxt2_x[row] + wBy * rbxt2_y[row] + wBz * rbxt2_z[row];
+
+    const double v_rel_t1 = t1x[row] * dvx + t1y[row] * dvy + t1z[row] * dvz +
+                            wB_dot_rbxt1 - wA_dot_raxt1;
+    const double v_rel_t2 = t2x[row] * dvx + t2y[row] * dvy + t2z[row] * dvz +
+                            wB_dot_rbxt2 - wA_dot_raxt2;
+
+    double jt1_candidate = jt1[row] + (-v_rel_t1) * inv_k_t1[row];
+    double jt2_candidate = jt2[row] + (-v_rel_t2) * inv_k_t2[row];
+
+    const double friction_max = mu[row] * std::max(jn[row], 0.0);
+    const double friction_max_sq = friction_max * friction_max;
+    const double jt_mag_sq =
+        jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
+    double scale = 1.0;
+    if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
+      const double jt_mag = std::sqrt(jt_mag_sq);
+      scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+      if (view.debug) {
+        ++view.debug->tangent_projections;
+      }
+    }
+
+    jt1_candidate *= scale;
+    jt2_candidate *= scale;
+    const double delta_jt1 = jt1_candidate - jt1[row];
+    const double delta_jt2 = jt2_candidate - jt2[row];
+    jt1[row] = jt1_candidate;
+    jt2[row] = jt2_candidate;
+
+    if (std::fabs(delta_jt1) <= math::kEps &&
+        std::fabs(delta_jt2) <= math::kEps) {
+      continue;
+    }
+
+    const double impulse_x = delta_jt1 * t1x[row] + delta_jt2 * t2x[row];
+    const double impulse_y = delta_jt1 * t1y[row] + delta_jt2 * t2y[row];
+    const double impulse_z = delta_jt1 * t1z[row] + delta_jt2 * t2z[row];
+
+    A.v.x -= impulse_x * A.inv_mass;
+    A.v.y -= impulse_y * A.inv_mass;
+    A.v.z -= impulse_z * A.inv_mass;
+    B.v.x += impulse_x * B.inv_mass;
+    B.v.y += impulse_y * B.inv_mass;
+    B.v.z += impulse_z * B.inv_mass;
+
+    A.w.x -= delta_jt1 * TWt1_a_x[row] + delta_jt2 * TWt2_a_x[row];
+    A.w.y -= delta_jt1 * TWt1_a_y[row] + delta_jt2 * TWt2_a_y[row];
+    A.w.z -= delta_jt1 * TWt1_a_z[row] + delta_jt2 * TWt2_a_z[row];
+    B.w.x += delta_jt1 * TWt1_b_x[row] + delta_jt2 * TWt2_b_x[row];
+    B.w.y += delta_jt1 * TWt1_b_y[row] + delta_jt2 * TWt2_b_y[row];
+    B.w.z += delta_jt1 * TWt1_b_z[row] + delta_jt2 * TWt2_b_z[row];
+  }
+}
+
+void solve_tile(TileWorkView& view) {
+  if (!view.scratch->normals_only.empty()) {
+    solve_rows_normals_only(view);
+  }
+  if (!view.scratch->particles.empty()) {
+    solve_rows_particles(view);
+  }
+  if (!view.scratch->frictional.empty()) {
+    solve_rows_frictional(view);
+  }
+}
 
 double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
   return DurationMs(end - begin).count();
@@ -42,6 +735,15 @@ SoaParams make_soa_params(const SolverParams& params) {
   if (derived.block_size <= 0) {
     derived.block_size = 1;
   }
+  if (derived.tile_size <= 0) {
+    derived.tile_size = 128;
+  }
+  if (derived.max_contacts_per_tile <= 0) {
+    derived.max_contacts_per_tile = derived.tile_size;
+  } else {
+    derived.tile_size = derived.max_contacts_per_tile;
+  }
+  derived.max_contacts_per_tile = derived.tile_size;
   return derived;
 }
 
@@ -164,6 +866,8 @@ void build_soa(const std::vector<RigidBody>& bodies,
       rows.jn.resize(size);
       rows.jt1.resize(size);
       rows.jt2.resize(size);
+      rows.flags.resize(size);
+      rows.types.resize(size);
       rows.indices.resize(size);
     };
     resize_all(capacity);
@@ -357,6 +1061,15 @@ void build_soa(const std::vector<RigidBody>& bodies,
     rows.bias[write_index] = bias;
     rows.bounce[write_index] = bounce;
     rows.C[write_index] = violation;
+    std::uint8_t flags = 0;
+    if (mu > math::kEps) {
+      flags |= 0x1;
+    }
+    if (c.type == Contact::Type::kSphereSphere) {
+      flags |= 0x2;
+    }
+    rows.flags[write_index] = flags;
+    rows.types[write_index] = static_cast<std::uint8_t>(c.type);
 
     ++write_index;
   }
@@ -400,6 +1113,32 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
 
   for (RigidBody& body : bodies) {
     body.syncDerived();
+  }
+
+  if (params.warm_start) {
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      const int idx = rows.indices[i];
+      if (idx < 0 || idx >= static_cast<int>(contacts.size())) {
+        continue;
+      }
+      Contact& c = contacts[static_cast<std::size_t>(idx)];
+      const Vec3 curr_t1(rows.t1x[i], rows.t1y[i], rows.t1z[i]);
+      const Vec3 curr_t2(rows.t2x[i], rows.t2y[i], rows.t2z[i]);
+      const double prev_len_sq = math::length2(c.prev_t1);
+      const double curr_len_sq = math::length2(curr_t1);
+      if (prev_len_sq > math::kEps && curr_len_sq > math::kEps) {
+        const double inv_len = 1.0 / std::sqrt(prev_len_sq * curr_len_sq);
+        const double cos_angle = math::dot(c.prev_t1, curr_t1) * inv_len;
+        if (cos_angle < kWarmstartRotationCosThreshold) {
+          rows.jt1[i] = 0.0;
+          rows.jt2[i] = 0.0;
+          c.jt1 = 0.0;
+          c.jt2 = 0.0;
+        }
+      }
+      c.prev_t1 = curr_t1;
+      c.prev_t2 = curr_t2;
+    }
   }
 
   const auto warmstart_begin = Clock::now();
@@ -552,245 +1291,21 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     }
   };
 
+  const int tile_size =
+      std::max(1, (params.tile_size > 0) ? params.tile_size : params.max_contacts_per_tile);
+  std::vector<Tile> tiles = build_tiles(rows, bodies.size(), tile_size);
+  TileSolveScratch scratch;
+  TileWorkView view{&scratch, &bodies, &rows, debug_info};
+
   const auto iteration_begin = Clock::now();
   for (int it = 0; it < iterations; ++it) {
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-      const int ia = rows.a[i];
-      const int ib = rows.b[i];
-      if (ia < 0 || ib < 0 || ia >= static_cast<int>(bodies.size()) ||
-          ib >= static_cast<int>(bodies.size())) {
-        if (debug_info) {
-          ++debug_info->invalid_contact_indices;
-        }
+    for (const Tile& tile : tiles) {
+      stage_tile(view, tile);
+      if (scratch.contacts.empty()) {
         continue;
       }
-
-      RigidBody& A = bodies[ia];
-      RigidBody& B = bodies[ib];
-
-      const double invMassA = A.invMass;
-      const double invMassB = B.invMass;
-      // Cache the current relative kinematics so we can update them in-place
-      // as impulses are applied. This avoids reloading body velocities when
-      // computing the tangential solve.
-      double dvx = B.v.x - A.v.x;
-      double dvy = B.v.y - A.v.y;
-      double dvz = B.v.z - A.v.z;
-      double wAx = A.w.x;
-      double wAy = A.w.y;
-      double wAz = A.w.z;
-      double wBx = B.w.x;
-      double wBy = B.w.y;
-      double wBz = B.w.z;
-
-      const double nx = rows.nx[i];
-      const double ny = rows.ny[i];
-      const double nz = rows.nz[i];
-
-      const double raxn_x = rows.raxn_x[i];
-      const double raxn_y = rows.raxn_y[i];
-      const double raxn_z = rows.raxn_z[i];
-      const double rbxn_x = rows.rbxn_x[i];
-      const double rbxn_y = rows.rbxn_y[i];
-      const double rbxn_z = rows.rbxn_z[i];
-      const double wA_dot_raxn = wAx * raxn_x + wAy * raxn_y + wAz * raxn_z;
-      const double wB_dot_rbxn = wBx * rbxn_x + wBy * rbxn_y + wBz * rbxn_z;
-
-      const double v_rel_n = nx * dvx + ny * dvy + nz * dvz +
-                             wB_dot_rbxn - wA_dot_raxn;
-
-      const double rhs = -(v_rel_n + rows.bias[i] - rows.bounce[i]);
-
-      // Multiplying by the cached reciprocal avoids a divide in this hot loop;
-      // degenerate denominators were clamped during row construction.
-      const double delta_jn = rhs * rows.inv_k_n[i];
-      const double jn_old = rows.jn[i];
-      double jn_candidate = jn_old + delta_jn;
-      if (jn_candidate < 0.0) {
-        if (debug_info) {
-          ++debug_info->normal_impulse_clamps;
-        }
-        jn_candidate = 0.0;
-      }
-      rows.jn[i] = jn_candidate;
-      const double applied_n = rows.jn[i] - jn_old;
-      if (std::fabs(applied_n) > math::kEps) {
-        const double impulse_x = applied_n * nx;
-        const double impulse_y = applied_n * ny;
-        const double impulse_z = applied_n * nz;
-        const double inv_mass_sum = invMassA + invMassB;
-
-        A.v.x -= impulse_x * invMassA;
-        A.v.y -= impulse_y * invMassA;
-        A.v.z -= impulse_z * invMassA;
-        B.v.x += impulse_x * invMassB;
-        B.v.y += impulse_y * invMassB;
-        B.v.z += impulse_z * invMassB;
-
-        dvx += impulse_x * inv_mass_sum;
-        dvy += impulse_y * inv_mass_sum;
-        dvz += impulse_z * inv_mass_sum;
-
-        const double TWn_ax = rows.TWn_a_x[i];
-        const double TWn_ay = rows.TWn_a_y[i];
-        const double TWn_az = rows.TWn_a_z[i];
-        const double TWn_bx = rows.TWn_b_x[i];
-        const double TWn_by = rows.TWn_b_y[i];
-        const double TWn_bz = rows.TWn_b_z[i];
-
-        A.w.x -= applied_n * TWn_ax;
-        A.w.y -= applied_n * TWn_ay;
-        A.w.z -= applied_n * TWn_az;
-        B.w.x += applied_n * TWn_bx;
-        B.w.y += applied_n * TWn_by;
-        B.w.z += applied_n * TWn_bz;
-
-        wAx -= applied_n * TWn_ax;
-        wAy -= applied_n * TWn_ay;
-        wAz -= applied_n * TWn_az;
-        wBx += applied_n * TWn_bx;
-        wBy += applied_n * TWn_by;
-        wBz += applied_n * TWn_bz;
-      }
-
-      const double mu = rows.mu[i];
-      if (mu <= math::kEps) {
-        rows.jt1[i] = 0.0;
-        rows.jt2[i] = 0.0;
-        continue;
-      }
-
-      const double t1x = rows.t1x[i];
-      const double t1y = rows.t1y[i];
-      const double t1z = rows.t1z[i];
-      const double t2x = rows.t2x[i];
-      const double t2y = rows.t2y[i];
-      const double t2z = rows.t2z[i];
-
-      const double raxt1_x = rows.raxt1_x[i];
-      const double raxt1_y = rows.raxt1_y[i];
-      const double raxt1_z = rows.raxt1_z[i];
-      const double rbxt1_x = rows.rbxt1_x[i];
-      const double rbxt1_y = rows.rbxt1_y[i];
-      const double rbxt1_z = rows.rbxt1_z[i];
-      const double raxt2_x = rows.raxt2_x[i];
-      const double raxt2_y = rows.raxt2_y[i];
-      const double raxt2_z = rows.raxt2_z[i];
-      const double rbxt2_x = rows.rbxt2_x[i];
-      const double rbxt2_y = rows.rbxt2_y[i];
-      const double rbxt2_z = rows.rbxt2_z[i];
-
-      const double wA_dot_raxt1 =
-          wAx * raxt1_x + wAy * raxt1_y + wAz * raxt1_z;
-      const double wB_dot_rbxt1 =
-          wBx * rbxt1_x + wBy * rbxt1_y + wBz * rbxt1_z;
-      const double wA_dot_raxt2 =
-          wAx * raxt2_x + wAy * raxt2_y + wAz * raxt2_z;
-      const double wB_dot_rbxt2 =
-          wBx * rbxt2_x + wBy * rbxt2_y + wBz * rbxt2_z;
-
-      const double v_rel_t1 = t1x * dvx + t1y * dvy + t1z * dvz +
-                              wB_dot_rbxt1 - wA_dot_raxt1;
-
-      const double v_rel_t2 = t2x * dvx + t2y * dvy + t2z * dvz +
-                              wB_dot_rbxt2 - wA_dot_raxt2;
-      const double vt_mag =
-          std::sqrt(v_rel_t1 * v_rel_t1 + v_rel_t2 * v_rel_t2);
-
-      double jt1_candidate =
-          rows.jt1[i] + (-v_rel_t1) * rows.inv_k_t1[i];
-
-      double jt2_candidate =
-          rows.jt2[i] + (-v_rel_t2) * rows.inv_k_t2[i];
-
-      double friction_max = mu * std::max(rows.jn[i], 0.0);
-      const double jt_mag_sq = jt1_candidate * jt1_candidate +
-                               jt2_candidate * jt2_candidate;
-      double friction_max_sq = friction_max * friction_max;
-      double scale = 1.0;
-      if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
-        const double jt_mag = std::sqrt(jt_mag_sq);
-        if (mu > 0.0 && vt_mag < kStaticFrictionSpeedThreshold) {
-          const double required_jn = jt_mag / mu;
-          const double delta_needed = required_jn - rows.jn[i];
-          if (delta_needed > math::kEps) {
-            rows.jn[i] = required_jn;
-            const double impulse_x = delta_needed * nx;
-            const double impulse_y = delta_needed * ny;
-            const double impulse_z = delta_needed * nz;
-            const double inv_mass_sum = invMassA + invMassB;
-
-            A.v.x -= impulse_x * invMassA;
-            A.v.y -= impulse_y * invMassA;
-            A.v.z -= impulse_z * invMassA;
-            B.v.x += impulse_x * invMassB;
-            B.v.y += impulse_y * invMassB;
-            B.v.z += impulse_z * invMassB;
-
-            dvx += impulse_x * inv_mass_sum;
-            dvy += impulse_y * inv_mass_sum;
-            dvz += impulse_z * inv_mass_sum;
-
-            const double TWn_ax = rows.TWn_a_x[i];
-            const double TWn_ay = rows.TWn_a_y[i];
-            const double TWn_az = rows.TWn_a_z[i];
-            const double TWn_bx = rows.TWn_b_x[i];
-            const double TWn_by = rows.TWn_b_y[i];
-            const double TWn_bz = rows.TWn_b_z[i];
-
-            A.w.x -= delta_needed * TWn_ax;
-            A.w.y -= delta_needed * TWn_ay;
-            A.w.z -= delta_needed * TWn_az;
-            B.w.x += delta_needed * TWn_bx;
-            B.w.y += delta_needed * TWn_by;
-            B.w.z += delta_needed * TWn_bz;
-
-            wAx -= delta_needed * TWn_ax;
-            wAy -= delta_needed * TWn_ay;
-            wAz -= delta_needed * TWn_az;
-            wBx += delta_needed * TWn_bx;
-            wBy += delta_needed * TWn_by;
-            wBz += delta_needed * TWn_bz;
-
-            friction_max = mu * std::max(rows.jn[i], 0.0);
-            friction_max_sq = friction_max * friction_max;
-          }
-        }
-        if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
-          scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
-        }
-        if (debug_info) {
-          ++debug_info->tangent_projections;
-        }
-      }
-
-      jt1_candidate *= scale;
-      jt2_candidate *= scale;
-
-      const double delta_jt1 = jt1_candidate - rows.jt1[i];
-      const double delta_jt2 = jt2_candidate - rows.jt2[i];
-      rows.jt1[i] = jt1_candidate;
-      rows.jt2[i] = jt2_candidate;
-
-      if (std::fabs(delta_jt1) > math::kEps || std::fabs(delta_jt2) > math::kEps) {
-        const double impulse_x = delta_jt1 * t1x + delta_jt2 * t2x;
-        const double impulse_y = delta_jt1 * t1y + delta_jt2 * t2y;
-        const double impulse_z = delta_jt1 * t1z + delta_jt2 * t2z;
-
-        A.v.x -= impulse_x * A.invMass;
-        A.v.y -= impulse_y * A.invMass;
-        A.v.z -= impulse_z * A.invMass;
-        B.v.x += impulse_x * B.invMass;
-        B.v.y += impulse_y * B.invMass;
-        B.v.z += impulse_z * B.invMass;
-
-        A.w.x -= delta_jt1 * rows.TWt1_a_x[i] + delta_jt2 * rows.TWt2_a_x[i];
-        A.w.y -= delta_jt1 * rows.TWt1_a_y[i] + delta_jt2 * rows.TWt2_a_y[i];
-        A.w.z -= delta_jt1 * rows.TWt1_a_z[i] + delta_jt2 * rows.TWt2_a_z[i];
-        B.w.x += delta_jt1 * rows.TWt1_b_x[i] + delta_jt2 * rows.TWt2_b_x[i];
-        B.w.y += delta_jt1 * rows.TWt1_b_y[i] + delta_jt2 * rows.TWt2_b_y[i];
-        B.w.z += delta_jt1 * rows.TWt1_b_z[i] + delta_jt2 * rows.TWt2_b_z[i];
-      }
+      solve_tile(view);
+      scatter_tile(scratch, bodies);
     }
 
     for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -906,6 +1421,8 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
     c.bias = rows.bias[i];
     c.bounce = rows.bounce[i];
     c.C = rows.C[i];
+    c.prev_t1 = Vec3(rows.t1x[i], rows.t1y[i], rows.t1z[i]);
+    c.prev_t2 = Vec3(rows.t2x[i], rows.t2y[i], rows.t2z[i]);
   }
 
   const auto integrate_begin = Clock::now();
