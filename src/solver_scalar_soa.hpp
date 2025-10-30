@@ -1,6 +1,7 @@
 #pragma once
 
 #include "joints.hpp"
+#include "soa/world.hpp"
 #include "solver_scalar_cached.hpp"
 
 #include <string>
@@ -138,3 +139,9 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
                       RowSOA& rows,
                       const SolverParams& params,
                       SolverDebugInfo* debug_info = nullptr);
+
+namespace soa {
+
+void solve_soa(World& world, ContactManifold& cm, const SolverParams& params);
+
+}

@@ -130,6 +130,9 @@ struct CliOptions {
   std::vector<int> sizes;
   std::vector<std::string> solver_list;
   std::vector<int> tile_sizes;
+  int tile_rows = -1;
+  bool spheres_only = false;
+  bool frictionless = false;
 };
 
 int parse_int_default(const std::string& value, int fallback) {
@@ -312,6 +315,15 @@ CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthro
           opts.tile_sizes.push_back(value);
         }
       }
+    } else if (arg.rfind("--tile_rows=", 0) == 0) {
+      opts.run_cli = true;
+      opts.tile_rows = std::max(1, parse_int_default(arg.substr(12), 128));
+    } else if (arg == "--spheres-only") {
+      opts.run_cli = true;
+      opts.spheres_only = true;
+    } else if (arg == "--frictionless") {
+      opts.run_cli = true;
+      opts.frictionless = true;
     } else if (arg.rfind("--csv=", 0) == 0) {
       opts.csv_path = arg.substr(6);
     } else if (arg == "--benchmark") {
@@ -392,7 +404,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
                                                int steps,
                                                double dt,
                                                int threads,
-                                               int tile_size_override) {
+                                               int tile_size_override,
+                                               const CliOptions* overrides = nullptr) {
   const int safe_iterations = std::max(1, iterations);
   const int safe_steps = std::max(1, steps);
   const int safe_threads = std::max(1, threads);
@@ -424,6 +437,13 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     params.iterations = safe_iterations;
     params.dt = dt;
     configure_solver_params(scene_name, params);
+    if (overrides) {
+      if (overrides->tile_rows > 0) {
+        params.tile_rows = overrides->tile_rows;
+      }
+      params.spheres_only = overrides->spheres_only;
+      params.frictionless = overrides->frictionless;
+    }
     for (int step = 0; step < safe_steps; ++step) {
       build_contact_offsets_and_bias(bodies, contacts, params);
       build_distance_joint_rows(bodies, joints, params.dt);
@@ -441,6 +461,13 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       params.tile_size = tile_size_override;
       params.max_contacts_per_tile = tile_size_override;
     }
+    if (overrides) {
+      if (overrides->tile_rows > 0) {
+        params.tile_rows = overrides->tile_rows;
+      }
+      params.spheres_only = overrides->spheres_only;
+      params.frictionless = overrides->frictionless;
+    }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result =
         run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
@@ -454,6 +481,13 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     if (tile_size_override > 0) {
       params.tile_size = tile_size_override;
       params.max_contacts_per_tile = tile_size_override;
+    }
+    if (overrides) {
+      if (overrides->tile_rows > 0) {
+        params.tile_rows = overrides->tile_rows;
+      }
+      params.spheres_only = overrides->spheres_only;
+      params.frictionless = overrides->frictionless;
     }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result = run_soa_vectorized_result(scene_name, base_scene,
@@ -618,7 +652,7 @@ bool run_cli_mode(const CliOptions& opts) {
         for (int tile_size : tile_sizes) {
           const int override_tile = (tile_size > 0) ? tile_size : -1;
           auto maybe = run_solver_case(solver_name, req.name, req.scene, iterations,
-                                       steps, dt, threads, override_tile);
+                                       steps, dt, threads, override_tile, &opts);
           if (!maybe.has_value()) {
             std::cerr << "Skipping solver: " << solver_name
                       << " for scene " << req.name << "\n";
@@ -629,7 +663,7 @@ bool run_cli_mode(const CliOptions& opts) {
         }
       } else {
         auto maybe = run_solver_case(solver_name, req.name, req.scene, iterations,
-                                     steps, dt, threads, -1);
+                                     steps, dt, threads, -1, &opts);
         if (!maybe.has_value()) {
           std::cerr << "Skipping solver: " << solver_name
                     << " for scene " << req.name << "\n";

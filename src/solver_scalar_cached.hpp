@@ -15,6 +15,9 @@ struct SolverParams {
   bool warm_start = true;
   int tile_size = 128;
   int max_contacts_per_tile = 128;
+  int tile_rows = 128;
+  bool spheres_only = false;
+  bool frictionless = false;
 };
 
 void solve_scalar_cached(std::vector<RigidBody>& bodies,

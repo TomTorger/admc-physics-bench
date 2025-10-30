@@ -40,8 +40,9 @@ add_library(core
   src/math.hpp src/types.hpp
   src/contact_gen.cc src/scenes.cc src/metrics.cc src/metrics_micro.cc src/joints.cc
   src/solver_baseline_vec.cc src/solver_scalar_cached.cc src/solver_scalar_soa.cc
+  src/solver_scalar_soa.cpp src/solver_scalar_soa_spheres.cpp
   src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
-  src/solver_scalar_soa_vectorized.cc)
+  src/solver_scalar_soa_vectorized.cc src/soa/tiler.cpp)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 
@@ -90,11 +91,14 @@ if(BUILD_TESTING)
   target_link_libraries(test_csv_header_only PRIVATE core)
   add_executable(test_energy_and_penetration tests/test_energy_and_penetration.cc)
   target_link_libraries(test_energy_and_penetration PRIVATE core)
+  add_executable(test_parity_soa_vs_baseline tests/parity_soa_vs_baseline.cc)
+  target_link_libraries(test_parity_soa_vs_baseline PRIVATE core)
 
   add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers test_joints
                                    test_simd_parity test_thread_determinism
                                    test_quick_parity test_csv_header_only
-                                   test_energy_and_penetration)
+                                   test_energy_and_penetration
+                                   test_parity_soa_vs_baseline)
 
   add_test(NAME test_invariants COMMAND test_invariants)
   add_test(NAME test_sanity COMMAND test_sanity)
@@ -105,4 +109,5 @@ if(BUILD_TESTING)
   add_test(NAME test_quick_parity COMMAND test_quick_parity)
   add_test(NAME test_csv_header_only COMMAND test_csv_header_only)
   add_test(NAME test_energy_and_penetration COMMAND test_energy_and_penetration)
+  add_test(NAME test_parity_soa_vs_baseline COMMAND test_parity_soa_vs_baseline)
 endif()
