@@ -28,10 +28,6 @@ enum RowFlags : std::uint8_t {
   kRowIsParticle = 1u << 1,
 };
 
-struct Tile {
-  std::vector<int> rows;
-};
-
 struct TileContactRef {
   int row = -1;
   int local_a = -1;
@@ -45,43 +41,28 @@ struct LocalBodyState {
   double inv_mass = 0.0;
 };
 
-struct TileSolveScratch {
+struct Tile {
+  std::vector<int> rows;
   std::vector<int> body_ids;
-  std::vector<LocalBodyState> bodies;
   std::vector<TileContactRef> contacts;
   std::vector<int> normals_only;
   std::vector<int> particles;
   std::vector<int> frictional;
-
-  void clear() {
-    body_ids.clear();
-    bodies.clear();
-    contacts.clear();
-    normals_only.clear();
-    particles.clear();
-    frictional.clear();
-  }
 };
 
-int find_or_add_local_body(int body,
-                           std::vector<int>& local_ids,
-                           std::vector<LocalBodyState>& states,
-                           const std::vector<RigidBody>& bodies) {
+struct TileSolveScratch {
+  std::vector<LocalBodyState> bodies;
+
+  void resize_bodies(std::size_t count) { bodies.resize(count); }
+};
+
+int find_or_add_local_body(int body, std::vector<int>& local_ids) {
   for (std::size_t i = 0; i < local_ids.size(); ++i) {
     if (local_ids[i] == body) {
       return static_cast<int>(i);
     }
   }
-  LocalBodyState state;
-  state.body = body;
-  if (body >= 0 && body < static_cast<int>(bodies.size())) {
-    const RigidBody& rb = bodies[static_cast<std::size_t>(body)];
-    state.v = rb.v;
-    state.w = rb.w;
-    state.inv_mass = rb.invMass;
-  }
   local_ids.push_back(body);
-  states.push_back(state);
   return static_cast<int>(local_ids.size() - 1);
 }
 
@@ -165,6 +146,37 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
       Tile tile;
       tile.rows.assign(island_rows.begin() + static_cast<std::ptrdiff_t>(offset),
                        island_rows.begin() + static_cast<std::ptrdiff_t>(end));
+      tile.body_ids.reserve(tile.rows.size() * 2);
+      tile.contacts.reserve(tile.rows.size());
+      tile.normals_only.reserve(tile.rows.size());
+      tile.particles.reserve(tile.rows.size());
+      tile.frictional.reserve(tile.rows.size());
+
+      for (int row : tile.rows) {
+        TileContactRef ref;
+        ref.row = row;
+
+        const int a = rows.a[row];
+        const int b = rows.b[row];
+        if (a >= 0 && a < static_cast<int>(body_count)) {
+          ref.local_a = find_or_add_local_body(a, tile.body_ids);
+        }
+        if (b >= 0 && b < static_cast<int>(body_count)) {
+          ref.local_b = find_or_add_local_body(b, tile.body_ids);
+        }
+
+        tile.contacts.push_back(ref);
+        const int contact_index = static_cast<int>(tile.contacts.size() - 1);
+        const std::uint8_t flags = rows.flags[row];
+        if ((flags & kRowHasFriction) == 0) {
+          tile.normals_only.push_back(contact_index);
+        } else if (flags & kRowIsParticle) {
+          tile.particles.push_back(contact_index);
+        } else {
+          tile.frictional.push_back(contact_index);
+        }
+      }
+
       tiles.push_back(std::move(tile));
     }
   }
@@ -193,51 +205,31 @@ struct TileWorkView {
 
 void stage_tile(TileWorkView& view, const Tile& tile) {
   TileSolveScratch& scratch = *view.scratch;
-  scratch.clear();
-  scratch.body_ids.reserve(tile.rows.size() * 2);
-  scratch.bodies.reserve(tile.rows.size() * 2);
-  scratch.contacts.reserve(tile.rows.size());
-  scratch.normals_only.reserve(tile.rows.size());
-  scratch.particles.reserve(tile.rows.size());
-  scratch.frictional.reserve(tile.rows.size());
+  scratch.resize_bodies(tile.body_ids.size());
 
-  for (int row : tile.rows) {
-    const int a = view.rows->a[row];
-    const int b = view.rows->b[row];
-    if (a < 0 || b < 0 || a >= static_cast<int>(view.bodies->size()) ||
-        b >= static_cast<int>(view.bodies->size())) {
-      if (view.debug) {
-        ++view.debug->invalid_contact_indices;
-      }
-      continue;
-    }
-
-    const int local_a =
-        find_or_add_local_body(a, scratch.body_ids, scratch.bodies, *view.bodies);
-    const int local_b =
-        find_or_add_local_body(b, scratch.body_ids, scratch.bodies, *view.bodies);
-
-    TileContactRef ref;
-    ref.row = row;
-    ref.local_a = local_a;
-    ref.local_b = local_b;
-    scratch.contacts.push_back(ref);
-    const int contact_index = static_cast<int>(scratch.contacts.size() - 1);
-    const std::uint8_t flags = view.rows->flags[row];
-    if ((flags & kRowHasFriction) == 0) {
-      scratch.normals_only.push_back(contact_index);
-    } else if (flags & kRowIsParticle) {
-      scratch.particles.push_back(contact_index);
+  for (std::size_t i = 0; i < tile.body_ids.size(); ++i) {
+    LocalBodyState state;
+    state.body = tile.body_ids[i];
+    if (state.body >= 0 &&
+        state.body < static_cast<int>(view.bodies->size())) {
+      const RigidBody& rb =
+          (*view.bodies)[static_cast<std::size_t>(state.body)];
+      state.v = rb.v;
+      state.w = rb.w;
+      state.inv_mass = rb.invMass;
     } else {
-      scratch.frictional.push_back(contact_index);
+      state.v = Vec3();
+      state.w = Vec3();
+      state.inv_mass = 0.0;
     }
+    scratch.bodies[i] = state;
   }
 }
 
-void solve_rows_normals_only(TileWorkView& view) {
+void solve_rows_normals_only(TileWorkView& view, const Tile& tile) {
   TileSolveScratch& scratch = *view.scratch;
   RowSOA& rows = *view.rows;
-  auto& contacts = scratch.contacts;
+  const auto& contacts = tile.contacts;
   auto& bodies = scratch.bodies;
   double* ADMC_RESTRICT jn = rows.jn.data();
   double* ADMC_RESTRICT jt1 = rows.jt1.data();
@@ -264,8 +256,8 @@ void solve_rows_normals_only(TileWorkView& view) {
 #if defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-  for (std::size_t idx = 0; idx < scratch.normals_only.size(); ++idx) {
-    const int contact_index = scratch.normals_only[idx];
+  for (std::size_t idx = 0; idx < tile.normals_only.size(); ++idx) {
+    const int contact_index = tile.normals_only[idx];
     if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
       continue;
     }
@@ -273,6 +265,9 @@ void solve_rows_normals_only(TileWorkView& view) {
     if (ref.local_a < 0 || ref.local_b < 0 ||
         ref.local_a >= static_cast<int>(bodies.size()) ||
         ref.local_b >= static_cast<int>(bodies.size())) {
+      if (view.debug) {
+        ++view.debug->invalid_contact_indices;
+      }
       continue;
     }
 
@@ -354,10 +349,10 @@ void solve_rows_normals_only(TileWorkView& view) {
   }
 }
 
-void solve_rows_particles(TileWorkView& view) {
+void solve_rows_particles(TileWorkView& view, const Tile& tile) {
   TileSolveScratch& scratch = *view.scratch;
   RowSOA& rows = *view.rows;
-  auto& contacts = scratch.contacts;
+  const auto& contacts = tile.contacts;
   auto& bodies = scratch.bodies;
   double* ADMC_RESTRICT jn = rows.jn.data();
   double* ADMC_RESTRICT jt1 = rows.jt1.data();
@@ -381,8 +376,8 @@ void solve_rows_particles(TileWorkView& view) {
 #if defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-  for (std::size_t idx = 0; idx < scratch.particles.size(); ++idx) {
-    const int contact_index = scratch.particles[idx];
+  for (std::size_t idx = 0; idx < tile.particles.size(); ++idx) {
+    const int contact_index = tile.particles[idx];
     if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
       continue;
     }
@@ -390,6 +385,9 @@ void solve_rows_particles(TileWorkView& view) {
     if (ref.local_a < 0 || ref.local_b < 0 ||
         ref.local_a >= static_cast<int>(bodies.size()) ||
         ref.local_b >= static_cast<int>(bodies.size())) {
+      if (view.debug) {
+        ++view.debug->invalid_contact_indices;
+      }
       continue;
     }
 
@@ -476,10 +474,10 @@ void solve_rows_particles(TileWorkView& view) {
   }
 }
 
-void solve_rows_frictional(TileWorkView& view) {
+void solve_rows_frictional(TileWorkView& view, const Tile& tile) {
   TileSolveScratch& scratch = *view.scratch;
   RowSOA& rows = *view.rows;
-  auto& contacts = scratch.contacts;
+  const auto& contacts = tile.contacts;
   auto& bodies = scratch.bodies;
   double* ADMC_RESTRICT jn = rows.jn.data();
   double* ADMC_RESTRICT jt1 = rows.jt1.data();
@@ -539,8 +537,8 @@ void solve_rows_frictional(TileWorkView& view) {
 #if defined(__clang__)
 #pragma clang loop vectorize(enable)
 #endif
-  for (std::size_t idx = 0; idx < scratch.frictional.size(); ++idx) {
-    const int contact_index = scratch.frictional[idx];
+  for (std::size_t idx = 0; idx < tile.frictional.size(); ++idx) {
+    const int contact_index = tile.frictional[idx];
     if (contact_index < 0 || contact_index >= static_cast<int>(contacts.size())) {
       continue;
     }
@@ -548,6 +546,9 @@ void solve_rows_frictional(TileWorkView& view) {
     if (ref.local_a < 0 || ref.local_b < 0 ||
         ref.local_a >= static_cast<int>(bodies.size()) ||
         ref.local_b >= static_cast<int>(bodies.size())) {
+      if (view.debug) {
+        ++view.debug->invalid_contact_indices;
+      }
       continue;
     }
 
@@ -694,15 +695,15 @@ void solve_rows_frictional(TileWorkView& view) {
   }
 }
 
-void solve_tile(TileWorkView& view) {
-  if (!view.scratch->normals_only.empty()) {
-    solve_rows_normals_only(view);
+void solve_tile(TileWorkView& view, const Tile& tile) {
+  if (!tile.normals_only.empty()) {
+    solve_rows_normals_only(view, tile);
   }
-  if (!view.scratch->particles.empty()) {
-    solve_rows_particles(view);
+  if (!tile.particles.empty()) {
+    solve_rows_particles(view, tile);
   }
-  if (!view.scratch->frictional.empty()) {
-    solve_rows_frictional(view);
+  if (!tile.frictional.empty()) {
+    solve_rows_frictional(view, tile);
   }
 }
 
@@ -1300,11 +1301,11 @@ void solve_scalar_soa_scalar(std::vector<RigidBody>& bodies,
   const auto iteration_begin = Clock::now();
   for (int it = 0; it < iterations; ++it) {
     for (const Tile& tile : tiles) {
-      stage_tile(view, tile);
-      if (scratch.contacts.empty()) {
+      if (tile.contacts.empty()) {
         continue;
       }
-      solve_tile(view);
+      stage_tile(view, tile);
+      solve_tile(view, tile);
       scatter_tile(scratch, bodies);
     }
 
