@@ -6,9 +6,9 @@
 namespace soa {
 
 constexpr int kLane =
-#if defined(__AVX2__) || defined(ADMC_USE_AVX2)
+#if defined(__AVX2__) || defined(ADMC_ENABLE_AVX2)
     4
-#elif defined(__ARM_NEON) || defined(ADMC_USE_NEON)
+#elif defined(__ARM_NEON) || defined(ADMC_ENABLE_NEON)
     2
 #else
     1

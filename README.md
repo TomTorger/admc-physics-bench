@@ -124,13 +124,14 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 # Generic
-./build/bench/bench --benchmark_out=results/results.csv --benchmark_out_format=csv
+STAMP=$(date +%Y%m%d)
+./build/bench/bench --benchmark_out="results/${STAMP}/results.csv" --benchmark_out_format=csv
 
 # Convenience script (if present)
 bash scripts/run_bench.sh
 ```
 
-> The bench runs a fixed number of solver steps on multiple scenes and appends to `results/results.csv`.
+> The bench runs a fixed number of solver steps on multiple scenes and appends to `results/YYYYMMDD/results.csv`.
 
 ---
 
