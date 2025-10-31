@@ -129,6 +129,16 @@ Port the solver to GPU using SoA buffers shared with compute kernels. Leverage C
 ## Recommended Path
 Focus on the **fully SoA-native Gauss-Seidel** blueprint above: move body state to SoA, keep data resident in vector-friendly buffers across the entire solver loop, and eliminate per-iteration packing. Complement with SIMD-aware batch formation and optional fallback to scalar code for micro contact sets. Once stable, layer in micro-tiling and multi-threading to scale further.
 
+## Fully SoA-Native SIMD Solver
+
+The `scalar_soa_native` solver implements the blueprint directly. Bodies are mirrored into lane-aligned velocity arrays, contacts are staged once per frame into SIMD batches, and the Gauss–Seidel loop works entirely on those SoA buffers. Normal and friction constraints share the same batched kernels, keeping velocity updates lane-coherent while respecting the ADMC scalars for energy/momentum conservation.
+
+- **Data layout.** Per-body linear and angular velocities live in `BodySoA` scratch buffers, while each contact batch stores normals, tangents, effective mass, and Baumgarte bias in aligned arrays. Tail masks avoid scalar fallbacks and let AVX2/NEON paths execute on partial lanes without repacking.
+- **Execution flow.** Warm starting applies cached impulses directly to the SoA body state, iterations accumulate normal impulses first, then re-use the refreshed velocities for friction disk projection. Every phase is timed and reported through `SoaNativeStats`, allowing benchmark comparisons with earlier solvers.
+- **Benchmarks.** Add `scalar_soa_native` (aliases: `soa_native`, `native_soa`) to CLI sweeps with `--solvers` or the default suite. The SIMD solver roughly halves the iteration cost compared to the previous vectorized path, but end-to-end frame time still trails the AoS baseline because row construction remains dominant. Use the CSV output to track progress as further row-building optimizations land.
+
+See `docs/soa_native_solver_usage.md` for invocation details, tunable parameters, and current performance guidance.
+
 ## Integration & Modularization Strategy
 
 ### Ship as the Vectorized Solver First

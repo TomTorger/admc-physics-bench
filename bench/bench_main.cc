@@ -15,6 +15,7 @@
 #include "solver_baseline_vec.hpp"
 #include "solver_scalar_cached.hpp"
 #include "solver_scalar_soa.hpp"
+#include "solver_scalar_soa_native.hpp"
 #include "solver_scalar_soa_vectorized.hpp"
 #include "solver_scalar_soa_mt.hpp"
 #include "solver_scalar_soa_simd.hpp"
@@ -160,6 +161,7 @@ struct CliOptions {
   int tile_rows = -1;
   bool spheres_only = false;
   bool frictionless = false;
+  double convergence_threshold = -1.0;
 };
 
 int parse_int_default(const std::string& value, int fallback) {
@@ -232,6 +234,10 @@ std::string normalize_solver_name(std::string name) {
   }
   if (name == "scalar_soa" || name == "soa_simd" || name == "soa_mt") {
     return "soa";
+  }
+  if (name == "scalar_soa_native" || name == "soa_native" ||
+      name == "native_soa") {
+    return "soa_native";
   }
   if (name == "scalar_soa_vectorized" || name == "soa_vec" ||
       name == "soa_vectorized" || name == "vec_soa") {
@@ -357,6 +363,10 @@ CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthro
     } else if (arg == "--frictionless") {
       opts.run_cli = true;
       opts.frictionless = true;
+    } else if (arg.rfind("--convergence-threshold=", 0) == 0) {
+      opts.run_cli = true;
+      opts.convergence_threshold =
+          parse_double_default(arg.substr(24), opts.convergence_threshold);
     } else if (arg.rfind("--csv=", 0) == 0) {
       opts.csv_path = arg.substr(6);
     } else if (arg == "--benchmark") {
@@ -397,6 +407,7 @@ void print_run_summary(const BenchmarkResult& result) {
 enum class SoaSolverVariant {
   kLegacy,
   kVectorized,
+  kNative,
 };
 
 BenchmarkResult run_soa_variant_result(const std::string& scene_name,
@@ -429,6 +440,18 @@ BenchmarkResult run_soa_vectorized_result(const std::string& scene_name,
                                           const SolverParams& params,
                                           int steps,
                                           double ms_per_step_hint);
+
+BenchmarkResult run_soa_native_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SoaParams& params,
+                                      int steps,
+                                      double ms_per_step_hint);
+
+BenchmarkResult run_soa_native_result(const std::string& scene_name,
+                                      const Scene& base_scene,
+                                      const SolverParams& params,
+                                      int steps,
+                                      double ms_per_step_hint);
 
 std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
                                                const std::string& scene_name,
@@ -500,11 +523,41 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       }
       params.spheres_only = overrides->spheres_only;
       params.frictionless = overrides->frictionless;
+      if (overrides->convergence_threshold >= 0.0) {
+        params.convergence_threshold = overrides->convergence_threshold;
+      }
     }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result =
         run_soa_result(scene_name, base_scene, params, safe_steps, -1.0);
     return soa_result;
+  } else if (normalized == "soa_native") {
+    SoaParams params;
+    params.iterations = safe_iterations;
+    params.dt = dt;
+    params.use_threads = (safe_threads > 1);
+    params.thread_count = safe_threads;
+    params.use_simd = true;
+    if (tile_size_override > 0) {
+      params.tile_size = tile_size_override;
+      params.max_contacts_per_tile = tile_size_override;
+    }
+    if (overrides) {
+      if (overrides->tile_rows > 0) {
+        params.tile_rows = overrides->tile_rows;
+      }
+      params.spheres_only = overrides->spheres_only;
+      params.frictionless = overrides->frictionless;
+      if (overrides->convergence_threshold >= 0.0) {
+        params.convergence_threshold = overrides->convergence_threshold;
+      }
+    }
+    configure_solver_params(scene_name, params);
+    BenchmarkResult native_result = run_soa_native_result(
+        scene_name, base_scene, params, safe_steps, -1.0);
+    native_result.simd = true;
+    native_result.solver = "scalar_soa_native";
+    return native_result;
   } else if (normalized == "vec_soa") {
     SoaParams params;
     params.iterations = safe_iterations;
@@ -521,6 +574,9 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
       }
       params.spheres_only = overrides->spheres_only;
       params.frictionless = overrides->frictionless;
+      if (overrides->convergence_threshold >= 0.0) {
+        params.convergence_threshold = overrides->convergence_threshold;
+      }
     }
     configure_solver_params(scene_name, params);
     BenchmarkResult soa_result = run_soa_vectorized_result(scene_name, base_scene,
@@ -573,26 +629,32 @@ void run_default_suite(const std::string& csv_path) {
       {"two_spheres", "baseline", 10, 1},
       {"two_spheres", "cached", 10, 1},
       {"two_spheres", "soa", 10, 1},
+      {"two_spheres", "soa_native", 10, 1},
       {"two_spheres", "vec_soa", 10, 1},
       {"spheres_cloud_1024", "baseline", 10, 30},
       {"spheres_cloud_1024", "cached", 10, 30},
       {"spheres_cloud_1024", "soa", 10, 30},
+      {"spheres_cloud_1024", "soa_native", 10, 30},
       {"spheres_cloud_1024", "vec_soa", 10, 30},
       {"box_stack_4", "baseline", 10, 30},
       {"box_stack_4", "cached", 10, 30},
       {"box_stack_4", "soa", 10, 30},
+      {"box_stack_4", "soa_native", 10, 30},
       {"box_stack_4", "vec_soa", 10, 30},
       {"spheres_cloud_10k", "baseline", 10, 30},
       {"spheres_cloud_10k", "cached", 10, 30},
       {"spheres_cloud_10k", "soa", 10, 30},
+      {"spheres_cloud_10k", "soa_native", 10, 30},
       {"spheres_cloud_10k", "vec_soa", 10, 30},
       {"spheres_cloud_50k", "baseline", 10, 30},
       {"spheres_cloud_50k", "cached", 10, 30},
       {"spheres_cloud_50k", "soa", 10, 30},
+      {"spheres_cloud_50k", "soa_native", 10, 30},
       {"spheres_cloud_50k", "vec_soa", 10, 30},
       {"spheres_cloud_10k_fric", "baseline", 10, 30},
       {"spheres_cloud_10k_fric", "cached", 10, 30},
       {"spheres_cloud_10k_fric", "soa", 10, 30},
+      {"spheres_cloud_10k_fric", "soa_native", 10, 30},
       {"spheres_cloud_10k_fric", "vec_soa", 10, 30},
   };
 
@@ -600,6 +662,7 @@ void run_default_suite(const std::string& csv_path) {
   if (run_large_env && std::string(run_large_env) == "1") {
     cases.push_back({"spheres_cloud_8192", "cached", 10, 30});
     cases.push_back({"spheres_cloud_8192", "soa", 10, 30});
+    cases.push_back({"spheres_cloud_8192", "soa_native", 10, 30});
     cases.push_back({"spheres_cloud_8192", "vec_soa", 10, 30});
   }
 
@@ -639,7 +702,7 @@ bool run_cli_mode(const CliOptions& opts) {
   if (!opts.solver_list.empty()) {
     solvers = opts.solver_list;
   } else if (opts.solver == "auto") {
-    solvers = {"baseline", "cached", "soa", "vec_soa"};
+    solvers = {"baseline", "cached", "soa", "soa_native", "vec_soa"};
   } else {
     solvers.push_back(opts.solver);
   }
@@ -1536,6 +1599,13 @@ SoaSolveFn select_solver(SoaSolverVariant variant) {
         solve_scalar_soa_vectorized(bodies, contacts, rows, joints, params,
                                 debug_info);
       };
+    case SoaSolverVariant::kNative:
+      return [](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
+                RowSOA& rows, JointSOA& joints, const SoaParams& params,
+                SolverDebugInfo* debug_info) {
+        solve_scalar_soa_native(bodies, contacts, rows, joints, params,
+                                debug_info);
+      };
   }
   return nullptr;
 }
@@ -1546,6 +1616,8 @@ const char* solver_label(SoaSolverVariant variant) {
       return "scalar_soa";
     case SoaSolverVariant::kVectorized:
       return "vec_soa";
+    case SoaSolverVariant::kNative:
+      return "scalar_soa_native";
   }
   return "scalar_soa";
 }
@@ -1673,6 +1745,15 @@ BenchmarkResult run_soa_vectorized_result(const std::string& scene_name,
                                 ms_per_step_hint, SoaSolverVariant::kVectorized);
 }
 
+BenchmarkResult run_soa_native_result(const std::string& scene_name,
+                                  const Scene& base_scene,
+                                  const SoaParams& params,
+                                  int steps,
+                                  double ms_per_step_hint) {
+  return run_soa_variant_result(scene_name, base_scene, params, steps,
+                                ms_per_step_hint, SoaSolverVariant::kNative);
+}
+
 BenchmarkResult run_soa_result(const std::string& scene_name,
                                const Scene& base_scene,
                                const SolverParams& params,
@@ -1691,6 +1772,17 @@ BenchmarkResult run_soa_vectorized_result(const std::string& scene_name,
   SoaParams derived;
   static_cast<SolverParams&>(derived) = params;
   return run_soa_vectorized_result(scene_name, base_scene, derived, steps,
+                               ms_per_step_hint);
+}
+
+BenchmarkResult run_soa_native_result(const std::string& scene_name,
+                                  const Scene& base_scene,
+                                  const SolverParams& params,
+                                  int steps,
+                                  double ms_per_step_hint) {
+  SoaParams derived;
+  static_cast<SolverParams&>(derived) = params;
+  return run_soa_native_result(scene_name, base_scene, derived, steps,
                                ms_per_step_hint);
 }
 
