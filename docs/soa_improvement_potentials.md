@@ -153,3 +153,23 @@ The SIMD contact batches remain compute-bound on the solver iterations (≈64% o
 - Investigate vector-friendly scatter/accumulate paths so the SIMD contacts can update body velocities without per-lane scalar loops.
 - Re-measure with wider benchmark coverage (`spheres_cloud_4096`, joint-heavy scenes) once scatter becomes lane-friendly to ensure the SIMD pipeline scales.
 - Explore a follow-up documentation pass covering integration details for multi-threaded row assembly once the SIMD core stabilizes.
+
+### 2024-05-14 — SoA body tiles and SIMD scatter caches
+
+**Implemented**
+
+- Stage solver body velocities in a `BodySoA` cache and accumulate impulse deltas per SIMD batch using fixed-size `BodyTile` scratchpads before a single scatter.
+- Replace the per-lane scatter loops in the vectorized solver with the new accumulators so repeated bodies inside a batch reuse the cached velocity state.
+
+**Benchmark snapshot (Release, `./build/bench/bench --solver=auto --threads=1`)**
+
+| Scene | Steps | Iterations | Solver (ms) | Iteration (ms) | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `spheres_cloud_4096` | 30 | 10 | 19.830 | 11.093 | Vectorized SoA trims the iteration phase by ~66% compared to the scalar loop (32.360 ms → 11.093 ms) while keeping scatter amortized at 0.002 ms. |
+| `spheres_cloud_8192` | 20 | 10 | 58.118 | 38.443 | Larger clouds keep the scatter overhead negligible (≈0 ms) and shave ~1.7 ms off the solver pass even though the iteration stage remains comparable to the scalar loop (36.413 ms). |
+
+**Observations**
+
+- The per-batch tiles eliminate most redundant loads/stores on hot bodies, letting the SIMD kernel spend its time in math instead of scatter traffic.
+- Solver timings continue to scale predictably with contact count while the scatter phase stays effectively free on the vectorized path.
+- Follow-up opportunity: expose the tile size as a tuning knob so tiny islands can shrink the accumulator and avoid the assert guard for pathological contact graphs.
