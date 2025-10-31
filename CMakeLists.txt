@@ -90,6 +90,20 @@ add_executable(bench bench/bench_main.cc)
 target_link_libraries(bench PRIVATE core)
 set_target_properties(bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bench)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bench)
+
+# Provide a compatibility copy of the bench binary under the historical
+# name `bench_main` so existing scripts (including the CI chart updater)
+# can continue to invoke the executable without modification.
+set(ADMC_BENCH_LEGACY_PATH
+    "${CMAKE_BINARY_DIR}/bench/bench_main${CMAKE_EXECUTABLE_SUFFIX}")
+add_custom_command(
+  TARGET bench POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          $<TARGET_FILE:bench>
+          ${ADMC_BENCH_LEGACY_PATH}
+  BYPRODUCTS ${ADMC_BENCH_LEGACY_PATH}
+  COMMENT "Copying bench binary to legacy name bench_main"
+)
 if(ENABLE_BENCHMARKS)
   target_link_libraries(bench PRIVATE benchmark::benchmark)
   target_compile_definitions(bench PRIVATE ADMC_HAVE_GBENCH=1)
