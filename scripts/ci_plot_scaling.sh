@@ -21,7 +21,7 @@ rm -f "${CSV_PATH}"
 
 SCENE="spheres_cloud"
 SIZES="512,1024,2048,4096,8192"
-SOLVERS="baseline,cached,scalar_soa,scalar_soa_vectorized"
+SOLVERS="baseline,cached,scalar_soa,scalar_soa_native,scalar_soa_vectorized"
 ITERS="10"
 STEPS="60"
 

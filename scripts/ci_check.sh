@@ -36,21 +36,25 @@ run_case () {
 run_case two_spheres baseline       10 1
 run_case two_spheres cached         10 1
 run_case two_spheres soa            10 1
+run_case two_spheres soa_native     10 1
 run_case two_spheres soa_vectorized 10 1
 
 run_case spheres_cloud_1024 baseline       10 30
 run_case spheres_cloud_1024 cached         10 30
 run_case spheres_cloud_1024 soa            10 30
+run_case spheres_cloud_1024 soa_native     10 30
 run_case spheres_cloud_1024 soa_vectorized 10 30
 
 run_case box_stack_4 baseline       10 30
 run_case box_stack_4 cached         10 30
 run_case box_stack_4 soa            10 30
+run_case box_stack_4 soa_native     10 30
 run_case box_stack_4 soa_vectorized 10 30
 
 if [[ "${RUN_LARGE:-0}" == "1" ]]; then
   run_case spheres_cloud_8192 cached         10 30
   run_case spheres_cloud_8192 soa            10 30
+  run_case spheres_cloud_8192 soa_native     10 30
   run_case spheres_cloud_8192 soa_vectorized 10 30
 fi
 
