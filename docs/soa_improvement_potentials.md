@@ -194,3 +194,28 @@ Solver iteration cost now tracks contact count rather than body count, driving 6
 
 - Replace the per-body scatter loops with lane-coherent tiles so the SIMD batch can update velocities without quadratic lane checks.
 - Reuse the active-body discovery for row building to thread coarse batches across workers once friction kernels stop dominating.
+
+### 2024-05-16 — Dense local maps & friction guard band plan
+
+**Plan**
+
+- **Row tiler:** Replace the linear search performed by `find_or_add_local_body` with a dense `global → local` lookup table that is lazily populated per tile. Track only the bodies touched in a tile so we can reset the lookup without clearing an entire `body_count`-sized array each time. This removes the O(rows × bodies_in_tile) walk that currently dominates the row build on large clouds.
+- **Friction iteration:** Short-circuit the tangential solve when the Coulomb cone collapses (i.e., `mu * max(jn, 0)` is ~0). In that regime, the solver ends up clamping `jt` back to zero after expending the full dot-product chain; by gating on the tiny friction budget we avoid the redundant math while preserving the physical limit.
+
+These changes aim to shrink both hotspots called out in the latest benchmark sweep (row construction and friction-heavy iterations) without altering the solver’s mathematical behaviour outside the degenerate cases.
+
+**Implemented**
+
+- Added a per-tile dense lookup with a touched-body list so `build_tiles` no longer linearly scans `body_ids` for every contact insertion.
+- Guard the tangential Gauss–Seidel update behind the new `mu * jn` threshold, skipping the heavy dot chains when the Coulomb cone collapses to ~0.
+
+**Benchmark snapshot (Release, `bash scripts/run_bench.sh`)**
+
+| Scene | Solver | Row build (ms) | Iteration (ms) |
+| --- | --- | ---: | ---: |
+| `spheres_cloud_1024` | `scalar_soa` | 0.576 | 1.181 |
+| `spheres_cloud_10k` | `scalar_soa` | 16.477 | 21.475 |
+| `spheres_cloud_10k_fric` | `scalar_soa` | 12.593 | 17.689 |
+| `spheres_cloud_50k` | `scalar_soa` | 78.417 | 138.715 |
+
+Row construction for the 50k cloud now sits ~23% lower than the 101 ms snapshot logged on 2024-05-14, while friction-heavy iterations drop by roughly half (17.7 ms vs. the prior 37 ms) thanks to the guard band.【9d9cd8†L1-L5】【7da67f†L1-L6】【F:docs/soa_improvement_potentials.md†L140-L173】 Solver timings remain within guardrails across the benchmark suite.【c10b7e†L19-L38】【593d30†L1-L7】【b85381†L1-L6】【04fbb3†L1-L12】

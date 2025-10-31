@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <map>
 #include <numeric>
 #include <sstream>
 
@@ -56,14 +55,21 @@ struct TileSolveScratch {
   void resize_bodies(std::size_t count) { bodies.resize(count); }
 };
 
-int find_or_add_local_body(int body, std::vector<int>& local_ids) {
-  for (std::size_t i = 0; i < local_ids.size(); ++i) {
-    if (local_ids[i] == body) {
-      return static_cast<int>(i);
-    }
+int find_or_add_local_body(int body,
+                           std::vector<int>& local_ids,
+                           std::vector<int>& lookup,
+                           std::vector<int>& touched) {
+  if (body < 0 || body >= static_cast<int>(lookup.size())) {
+    return -1;
   }
+  int& entry = lookup[static_cast<std::size_t>(body)];
+  if (entry >= 0) {
+    return entry;
+  }
+  entry = static_cast<int>(local_ids.size());
   local_ids.push_back(body);
-  return static_cast<int>(local_ids.size() - 1);
+  touched.push_back(body);
+  return entry;
 }
 
 std::vector<Tile> build_tiles(const RowSOA& rows,
@@ -111,7 +117,9 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
     }
   }
 
-  std::map<int, std::vector<int>> islands;
+  std::vector<std::vector<int>> islands(body_count);
+  std::vector<int> active_islands;
+  active_islands.reserve(static_cast<std::size_t>(rows.N));
   for (int i = 0; i < rows.N; ++i) {
     const int a = rows.a[i];
     const int b = rows.b[i];
@@ -124,11 +132,19 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
     if (root < 0) {
       continue;
     }
-    islands[root].push_back(i);
+    auto& island_rows = islands[static_cast<std::size_t>(root)];
+    if (island_rows.empty()) {
+      active_islands.push_back(root);
+    }
+    island_rows.push_back(i);
   }
 
-  for (auto& entry : islands) {
-    auto& island_rows = entry.second;
+  std::vector<int> global_to_local(body_count, -1);
+  std::vector<int> touched_bodies;
+  touched_bodies.reserve(static_cast<std::size_t>(tile_size) * 2);
+
+  for (int root : active_islands) {
+    auto& island_rows = islands[static_cast<std::size_t>(root)];
     std::stable_sort(island_rows.begin(), island_rows.end(),
                      [&](int lhs, int rhs) {
                        if (rows.a[lhs] != rows.a[rhs]) {
@@ -152,6 +168,8 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
       tile.particles.reserve(tile.rows.size());
       tile.frictional.reserve(tile.rows.size());
 
+      touched_bodies.clear();
+
       for (int row : tile.rows) {
         TileContactRef ref;
         ref.row = row;
@@ -159,10 +177,12 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
         const int a = rows.a[row];
         const int b = rows.b[row];
         if (a >= 0 && a < static_cast<int>(body_count)) {
-          ref.local_a = find_or_add_local_body(a, tile.body_ids);
+          ref.local_a = find_or_add_local_body(a, tile.body_ids, global_to_local,
+                                               touched_bodies);
         }
         if (b >= 0 && b < static_cast<int>(body_count)) {
-          ref.local_b = find_or_add_local_body(b, tile.body_ids);
+          ref.local_b = find_or_add_local_body(b, tile.body_ids, global_to_local,
+                                               touched_bodies);
         }
 
         tile.contacts.push_back(ref);
@@ -177,8 +197,15 @@ std::vector<Tile> build_tiles(const RowSOA& rows,
         }
       }
 
+      for (int body : touched_bodies) {
+        if (body >= 0 && body < static_cast<int>(body_count)) {
+          global_to_local[static_cast<std::size_t>(body)] = -1;
+        }
+      }
+
       tiles.push_back(std::move(tile));
     }
+    island_rows.clear();
   }
 
   return tiles;
@@ -633,6 +660,13 @@ void solve_rows_frictional(TileWorkView& view, const Tile& tile) {
       continue;
     }
 
+    const double friction_limit = mu[row] * std::max(jn[row], 0.0);
+    if (friction_limit <= math::kEps) {
+      jt1[row] = 0.0;
+      jt2[row] = 0.0;
+      continue;
+    }
+
     const double wA_dot_raxt1 =
         wAx * raxt1_x[row] + wAy * raxt1_y[row] + wAz * raxt1_z[row];
     const double wB_dot_rbxt1 =
@@ -650,14 +684,14 @@ void solve_rows_frictional(TileWorkView& view, const Tile& tile) {
     double jt1_candidate = jt1[row] + (-v_rel_t1) * inv_k_t1[row];
     double jt2_candidate = jt2[row] + (-v_rel_t2) * inv_k_t2[row];
 
-    const double friction_max = mu[row] * std::max(jn[row], 0.0);
-    const double friction_max_sq = friction_max * friction_max;
+    const double friction_limit_sq = friction_limit * friction_limit;
     const double jt_mag_sq =
         jt1_candidate * jt1_candidate + jt2_candidate * jt2_candidate;
     double scale = 1.0;
-    if (jt_mag_sq > friction_max_sq && jt_mag_sq > math::kEps * math::kEps) {
+    if (jt_mag_sq > friction_limit_sq &&
+        jt_mag_sq > math::kEps * math::kEps) {
       const double jt_mag = std::sqrt(jt_mag_sq);
-      scale = (friction_max > 0.0) ? (friction_max / jt_mag) : 0.0;
+      scale = (friction_limit > 0.0) ? (friction_limit / jt_mag) : 0.0;
       if (view.debug) {
         ++view.debug->tangent_projections;
       }
@@ -670,8 +704,9 @@ void solve_rows_frictional(TileWorkView& view, const Tile& tile) {
     jt1[row] = jt1_candidate;
     jt2[row] = jt2_candidate;
 
-    if (std::fabs(delta_jt1) <= math::kEps &&
-        std::fabs(delta_jt2) <= math::kEps) {
+    const double delta_jt_mag_sq =
+        delta_jt1 * delta_jt1 + delta_jt2 * delta_jt2;
+    if (delta_jt_mag_sq <= math::kEps * math::kEps) {
       continue;
     }
 
