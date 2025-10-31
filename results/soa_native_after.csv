@@ -1,0 +1,8 @@
+scene,solver,iterations,steps,N_bodies,N_contacts,N_joints,tile_size,ms_per_step,drift_max,Linf_penetration,energy_drift,cone_consistency,simd,threads,commit_sha
+spheres_cloud_1024,scalar_soa_native,10,30,1025,3782,0,128,1.74437676667,0,0,0,1,1,1,606c8df
+spheres_cloud_4096,scalar_soa_native,10,30,4097,15616,0,128,10.4739180667,0,0,0,1,1,1,606c8df
+spheres_cloud_10000,scalar_soa_native,10,30,10001,38599,0,128,30.2483239,0,0,0,1,1,1,606c8df
+spheres_cloud_50000,scalar_soa_native,10,30,50001,195910,0,128,382.543491067,0,0,0,1,1,1,606c8df
+spheres_cloud_10k_fric,scalar_soa_native,10,30,10001,38599,0,128,34.1696238333,0,0,0,1,1,1,606c8df
+chain_64,scalar_soa_native,10,30,65,0,64,128,0.0131347666667,0,0,0,1,1,1,606c8df
+rope_256,scalar_soa_native,10,30,257,0,256,128,0.0373395666667,0,0,0,1,1,1,606c8df

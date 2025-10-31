@@ -17,6 +17,8 @@ using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
 
 constexpr double kStaticFrictionSpeedThreshold = 0.1;
+constexpr double kStaticFrictionSpeedThresholdSq =
+    kStaticFrictionSpeedThreshold * kStaticFrictionSpeedThreshold;
 
 double elapsed_ms(const Clock::time_point& begin, const Clock::time_point& end) {
   return DurationMs(end - begin).count();
@@ -50,8 +52,10 @@ struct BodySoA {
         wy(count, 0.0),
         wz(count, 0.0) {}
 
-  void load_from(const std::vector<RigidBody>& bodies) {
-    for (std::size_t i = 0; i < bodies.size(); ++i) {
+  void load_from(const std::vector<RigidBody>& bodies,
+                 const std::vector<int>& active_indices) {
+    for (int index : active_indices) {
+      const std::size_t i = static_cast<std::size_t>(index);
       vx[i] = bodies[i].v.x;
       vy[i] = bodies[i].v.y;
       vz[i] = bodies[i].v.z;
@@ -61,8 +65,10 @@ struct BodySoA {
     }
   }
 
-  void store_to(std::vector<RigidBody>& bodies) const {
-    for (std::size_t i = 0; i < bodies.size(); ++i) {
+  void store_to(std::vector<RigidBody>& bodies,
+                const std::vector<int>& active_indices) const {
+    for (int index : active_indices) {
+      const std::size_t i = static_cast<std::size_t>(index);
       bodies[i].v.x = vx[i];
       bodies[i].v.y = vy[i];
       bodies[i].v.z = vz[i];
@@ -313,17 +319,52 @@ inline void compute_relative_velocities(ContactBatch& batch,
   }
 }
 
-inline double clamp_tangent(double jt1, double jt2, double limit, bool* clamped) {
-  const double mag = std::sqrt(jt1 * jt1 + jt2 * jt2);
-  if (mag <= limit) {
+inline double clamp_tangent(double jt1,
+                            double jt2,
+                            double limit,
+                            double limit_sq,
+                            bool* clamped) {
+  const double mag_sq = jt1 * jt1 + jt2 * jt2;
+  if (mag_sq <= limit_sq) {
     return 1.0;
   }
-  if (mag <= math::kEps) {
+  if (mag_sq <= math::kEps * math::kEps) {
     return 1.0;
   }
   *clamped = true;
-  const double scale = limit / mag;
-  return scale;
+  const double inv_mag = 1.0 / std::sqrt(mag_sq);
+  return limit * inv_mag;
+}
+
+std::vector<int> collect_active_body_indices(const RowSOA& rows,
+                                             const JointSOA& joints,
+                                             std::size_t body_count) {
+  std::vector<int> active;
+  if (body_count == 0) {
+    return active;
+  }
+  std::vector<char> seen(body_count, 0);
+  auto mark = [&](int idx) {
+    if (idx < 0 || idx >= static_cast<int>(body_count)) {
+      return;
+    }
+    if (seen[static_cast<std::size_t>(idx)]) {
+      return;
+    }
+    seen[static_cast<std::size_t>(idx)] = 1;
+    active.push_back(idx);
+  };
+  const std::size_t contact_count = rows.size();
+  for (std::size_t i = 0; i < contact_count; ++i) {
+    mark(rows.a[i]);
+    mark(rows.b[i]);
+  }
+  const std::size_t joint_count = joints.size();
+  for (std::size_t i = 0; i < joint_count; ++i) {
+    mark(joints.a[i]);
+    mark(joints.b[i]);
+  }
+  return active;
 }
 
 inline void sanitize_solver_timings(SolverDebugInfo* info,
@@ -363,9 +404,11 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
   }
 
   BodySoA body_state(bodies.size());
+  const std::vector<int> active_bodies =
+      collect_active_body_indices(rows, joints, bodies.size());
   {
     ScopedAccumulator accum(&stats.staging_ms);
-    body_state.load_from(bodies);
+    body_state.load_from(bodies, active_bodies);
   }
 
   if (!params.warm_start) {
@@ -749,16 +792,18 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
           const double limit = batch.mu[lane] * std::max(batch.jn[lane], 0.0);
           const double vt1 = batch.rel_t1[lane];
           const double vt2 = batch.rel_t2[lane];
-          const double vt_mag = std::sqrt(vt1 * vt1 + vt2 * vt2);
+          const double vt_sq = vt1 * vt1 + vt2 * vt2;
           if (limit <= 0.0) {
             jt1_new = 0.0;
             jt2_new = 0.0;
-          } else if (vt_mag < kStaticFrictionSpeedThreshold) {
+          } else if (vt_sq < kStaticFrictionSpeedThresholdSq) {
             jt1_new = 0.0;
             jt2_new = 0.0;
           }
 
-          const double scale = clamp_tangent(jt1_new, jt2_new, limit, &clamped);
+          const double limit_sq = limit * limit;
+          const double scale =
+              clamp_tangent(jt1_new, jt2_new, limit, limit_sq, &clamped);
           if (clamped && debug_info) {
             ++debug_info->tangent_projections;
           }
@@ -832,7 +877,7 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
 
   {
     ScopedAccumulator accum(&stats.writeback_ms);
-    body_state.store_to(bodies);
+    body_state.store_to(bodies, active_bodies);
   }
 
   const auto solver_end = Clock::now();
