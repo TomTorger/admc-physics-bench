@@ -153,3 +153,44 @@ The SIMD contact batches remain compute-bound on the solver iterations (≈64% o
 - Investigate vector-friendly scatter/accumulate paths so the SIMD contacts can update body velocities without per-lane scalar loops.
 - Re-measure with wider benchmark coverage (`spheres_cloud_4096`, joint-heavy scenes) once scatter becomes lane-friendly to ensure the SIMD pipeline scales.
 - Explore a follow-up documentation pass covering integration details for multi-threaded row assembly once the SIMD core stabilizes.
+
+### 2024-05-14 — Native SIMD benchmark deep dive & follow-ups
+
+**Insights from the native SoA evaluation**
+
+- `spheres_cloud_50k` spends 101 ms/step in row construction versus 78 ms in the solver loop, and even the 10k-contact scenes still devote 14–15 ms to row assembly, making it the dominant cost once contact counts rise.【F:results/soa_native_eval.md†L3-L9】【F:results/soa_native_eval.md†L15-L17】
+- Friction-heavy workloads (e.g., `spheres_cloud_10k_fric`) more than double the solver time relative to the frictionless variant because tangential iterations consume ~37 ms/step, signalling headroom in the tangent microkernel.【F:results/soa_native_eval.md†L7-L8】【F:results/soa_native_eval.md†L16】
+- Body staging still mirrors every rigid body into SoA buffers and writes them back every step, regardless of how many participate in contacts.【F:src/solver_scalar_soa_native.cc†L37-L74】
+
+**Improvement opportunities**
+
+1. **Threaded & vectorized row build.** Extend the existing row builder with a coarse job system so large clouds split their 100k+ rows across workers, and reuse the SIMD-friendly dot-product structure from the solver to batch Jacobian assembly. The design note already advocates graph-colored, SIMD-aligned batches, so the parallel jobs can operate on disjoint tiles without data hazards.【F:results/soa_native_eval.md†L3-L9】【F:docs/soa_solver_design.md†L13-L38】
+2. **Active-body staging.** Instead of mirroring the full `bodies` array, track the body indices referenced by each `ContactBatch` and only gather/store those lanes; this avoids O(N) memcpy work on sparse scenes and aligns with the design goal of keeping body updates in SoA without redundant copies.【F:src/solver_scalar_soa_native.cc†L37-L74】【F:src/solver_scalar_soa_native.cc†L531-L557】【F:docs/soa_solver_design.md†L45-L52】
+3. **Lane-coherent impulse application.** The current `apply_body_delta` walks every lane in a batch for each body touch, turning scatter updates into O(lane²) loops; replacing this with per-body micro-tiles or a direct lane-to-body map would let SIMD stores remain contiguous and shrink the friction/normal hot paths.【F:src/solver_scalar_soa_native.cc†L253-L285】【F:src/solver_scalar_soa_native.cc†L633-L821】【F:docs/soa_solver_design.md†L31-L38】【F:docs/soa_solver_design.md†L51-L57】
+4. **Friction kernel heuristics.** The tangential solve currently evaluates square roots and Coulomb clamping for every lane even when relative tangential speed is already below the static threshold; introduce squared-magnitude tests and per-material gating so low-slip contacts skip expensive math without violating the Coulomb cone.【F:src/solver_scalar_soa_native.cc†L742-L821】
+
+Document the impact of each follow-up run here to keep the chronology intact.
+
+### 2024-05-15 — Active body staging & friction gating
+
+**Implemented**
+
+- Gather the unique rigid-body indices referenced by contact and joint rows before solving, and limit the SoA staging/readback to those active bodies to eliminate redundant O(N) copies on sparse scenes.【F:src/solver_scalar_soa_native.cc†L18-L113】【F:src/solver_scalar_soa_native.cc†L336-L372】
+- Replace the friction solver’s unconditional square-root work with squared-speed tests and clamp decisions that only normalize impulses when the Coulomb cone is actually exceeded.【F:src/solver_scalar_soa_native.cc†L15-L36】【F:src/solver_scalar_soa_native.cc†L780-L822】
+- Added a helper that reuses the staged active-body list during writeback so the solver no longer scatters updated velocities to untouched bodies.【F:src/solver_scalar_soa_native.cc†L336-L372】【F:src/solver_scalar_soa_native.cc†L847-L850】
+
+**Benchmark snapshot (Release, CLI)**
+
+| Scene | ms/step | Row build (ms) | Solver (ms) |
+| --- | ---: | ---: | ---: |
+| `spheres_cloud_1024` | 1.744 | 0.740 | 0.304 |
+| `spheres_cloud_4096` | 10.474 | 4.894 | 1.438 |
+| `spheres_cloud_10k_fric` | 34.170 | 16.707 | 4.945 |
+| `spheres_cloud_50k` | 382.543 | 100.495 | 33.934 |
+
+Solver iteration cost now tracks contact count rather than body count, driving 66–92% reductions on the cloud benchmarks and cutting the friction-heavy workload almost in half while keeping guardrail metrics unchanged.【88374b†L1-L13】【83f802†L1-L6】【c62707†L1-L6】【F:results/soa_native_eval.md†L4-L8】 Row construction remains the next major target, especially on the 50k-scene where it still dominates total frame time.【83f802†L1-L3】
+
+**Next ideas**
+
+- Replace the per-body scatter loops with lane-coherent tiles so the SIMD batch can update velocities without quadratic lane checks.
+- Reuse the active-body discovery for row building to thread coarse batches across workers once friction kernels stop dominating.
