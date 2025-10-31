@@ -10,7 +10,7 @@ This repository is a compact, self-contained lab for testing how far you can pus
 ## 📈 Performance (auto-updated by CI)
 
 The charts below are regenerated on each push to `main` by the `bench-and-plot` workflow.
-They show **ms/step** vs **scene size** (log–log) and **speedup vs baseline** for the scalar-cached and SoA solvers.
+They show **ms/step** vs **scene size** (log–log) and **speedup vs baseline** for the scalar-cached and SoA-family solvers (including the native SIMD variant).
 
 <p align="center">
   <img src="docs/assets/perf_scaling.svg" alt="Performance scaling (ms/step)" width="85%">
@@ -26,7 +26,7 @@ cmake -S . -B build -G Ninja -DADMC_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
 mkdir -p results
 build/bench/bench_main --scene spheres_cloud --sizes 1024,2048,4096,8192 \
-  --iters 10 --steps 30 --solvers baseline,cached,soa --tile-sizes 64,128,256 \
+  --iters 10 --steps 30 --solvers baseline,cached,soa,soa_native,vec_soa --tile-sizes 64,128,256 \
   --csv results/spheres_cloud.csv
 python3 tools/plot_perf.py --inputs results/*.csv --out docs/assets/perf_scaling.svg
 ```
@@ -49,6 +49,7 @@ This repo makes those trade-offs measurable across representative scenes.
 - ✅ **Baseline solver (AoS, vector-per-row)** — reference implementation.
 - ✅ **Scalar Cached solver (AoS)** — normal + friction as **scalar rows** with caching & warm-start.
 - ✅ **SoA-batched solver** — same math, **Structure-of-Arrays** for better memory/throughput.
+- ✅ **Fully SoA-native SIMD solver** — keeps bodies/contacts in SoA throughout the loop with SIMD-friendly batches.
 - ✅ **Vectorized SoA solver** — forwards through the new SIMD-friendly path for upcoming lane-specialized kernels.
 - ✅ **Deterministic scenes** — from two-body cases to particle-like clouds and stacks.
 - ✅ **Metrics** — directional-momentum drift, constraint error, energy drift, cone consistency.
@@ -76,6 +77,7 @@ scenes.*             # Deterministic test scenes
 solver_baseline_vec.*# Baseline AoS vector-per-row solver
 solver_scalar_cached.* # Scalar AoS solver (cached, warm-start, friction)
 solver_scalar_soa.*  # SoA-batched scalar solver
+solver_scalar_soa_native.* # Fully SoA-native SIMD solver
 types.hpp            # RigidBody, Contact, RowSOA (and friends)
 /tests/                # Sanity & invariants tests
 /results/              # CSV outputs from benches (gitignored except placeholder)
@@ -157,7 +159,15 @@ bash scripts/run_bench.sh
 > [docs/alg_scalar_friction_rows_math.md](docs/alg_scalar_friction_rows_math.md),
 > [docs/alg_scalar_soa_batched_math.md](docs/alg_scalar_soa_batched_math.md)
 
-### 4) Vectorized SoA solver
+### 4) Fully SoA-native SIMD solver
+
+* Keeps bodies and contacts in SoA buffers throughout the Gauss–Seidel loop.
+* Batches constraints directly into SIMD lanes, avoiding AoS shuffles entirely.
+* Tracks detailed timing breakdowns (row build vs. solver loop) and exposes convergence thresholds.
+
+> See: [docs/soa_native_solver_usage.md](docs/soa_native_solver_usage.md) for parameters and current performance guidance.
+
+### 5) Vectorized SoA solver
 
 * Shares the SoA pipeline while routing through the SIMD-friendly vectorized entrypoint.
 * Currently forwards to the scalar implementation while the dedicated kernels solidify, preserving instrumentation and timings.

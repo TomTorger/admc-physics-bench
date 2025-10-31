@@ -81,6 +81,7 @@ struct SoaParams : SolverParams {
   bool use_threads = true;
   int thread_count = std::thread::hardware_concurrency();
   int block_size = 128;
+  double convergence_threshold = 1e-4;
 };
 
 RowSOA build_soa(const std::vector<RigidBody>& bodies,

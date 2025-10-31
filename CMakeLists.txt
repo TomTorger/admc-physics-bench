@@ -60,6 +60,7 @@ add_library(core
   src/solver_baseline_vec.cc src/solver_scalar_cached.cc src/solver_scalar_soa.cc
   src/solver_scalar_soa.cpp src/solver_scalar_soa_spheres.cpp
   src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
+  src/solver_scalar_soa_native.cc
   src/solver_scalar_soa_vectorized.cc src/solver_vec_lane.cpp src/soa/tiler.cpp)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)

@@ -4,6 +4,7 @@
 #include "solver_baseline_vec.hpp"
 #include "solver_scalar_cached.hpp"
 #include "solver_scalar_soa.hpp"
+#include "solver_scalar_soa_native.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -50,19 +51,33 @@ void test_frictionless_parity() {
   build_soa(soa_scene.bodies, soa_scene.contacts, soa_params, rows);
   solve_scalar_soa(soa_scene.bodies, soa_scene.contacts, rows, soa_params);
 
+  Scene native_scene = base;
+  build_contact_offsets_and_bias(native_scene.bodies, native_scene.contacts,
+                                 solver_params);
+  RowSOA native_rows;
+  build_soa(native_scene.bodies, native_scene.contacts, soa_params, native_rows);
+  solve_scalar_soa_native(native_scene.bodies, native_scene.contacts, native_rows,
+                          soa_params);
+
   const Drift drift = directional_momentum_drift(pre, cached_scene.bodies);
   assert(drift.max_abs < 1e-10);
+  const Drift native_drift = directional_momentum_drift(pre, native_scene.bodies);
+  assert(native_drift.max_abs < 1e-10);
 
   for (std::size_t i = 0; i < baseline_scene.bodies.size(); ++i) {
     const RigidBody& b0 = baseline_scene.bodies[i];
     const RigidBody& b1 = cached_scene.bodies[i];
     const RigidBody& b2 = soa_scene.bodies[i];
+    const RigidBody& b3 = native_scene.bodies[i];
     assert(std::fabs(b0.v.x - b1.v.x) < 1e-6);
     assert(std::fabs(b0.v.y - b1.v.y) < 1e-6);
     assert(std::fabs(b0.v.z - b1.v.z) < 1e-6);
     assert(std::fabs(b0.v.x - b2.v.x) < 1e-6);
     assert(std::fabs(b0.v.y - b2.v.y) < 1e-6);
     assert(std::fabs(b0.v.z - b2.v.z) < 1e-6);
+    assert(std::fabs(b0.v.x - b3.v.x) < 1e-6);
+    assert(std::fabs(b0.v.y - b3.v.y) < 1e-6);
+    assert(std::fabs(b0.v.z - b3.v.z) < 1e-6);
   }
 
   const double speed = pre[0].v.x;
