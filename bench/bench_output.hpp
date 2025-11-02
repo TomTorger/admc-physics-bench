@@ -64,8 +64,12 @@ inline void print_result_line(const BenchResult& r,
             << " [warm=" << r.soa_timings.solver_warmstart_ms
             << ", iter=" << r.soa_timings.solver_iterations_ms
             << ", integ=" << r.soa_timings.solver_integrate_ms
-            << "], scatter=" << r.soa_timings.scatter_ms
-            << ", total=" << r.soa_timings.total_step_ms;
+            << "], scatter=" << r.soa_timings.scatter_ms;
+    if (r.soa_parallel_stage_ms > 0.0 || r.soa_parallel_scatter_ms > 0.0) {
+      timings << ", par_stage=" << r.soa_parallel_stage_ms
+              << ", par_scatter=" << r.soa_parallel_scatter_ms;
+    }
+    timings << ", total=" << r.soa_timings.total_step_ms;
     std::cout << timings.str() << '\n';
 
     if (!r.soa_debug_summary.empty()) {
@@ -110,8 +114,12 @@ inline void print_summary_table(const std::vector<BenchResult>& results) {
               << " [warm=" << r.soa_timings.solver_warmstart_ms
               << ", iter=" << r.soa_timings.solver_iterations_ms
               << ", integ=" << r.soa_timings.solver_integrate_ms
-              << "], scatter=" << r.soa_timings.scatter_ms
-              << ", total=" << r.soa_timings.total_step_ms;
+              << "], scatter=" << r.soa_timings.scatter_ms;
+      if (r.soa_parallel_stage_ms > 0.0 || r.soa_parallel_scatter_ms > 0.0) {
+        timings << ", par_stage=" << r.soa_parallel_stage_ms
+                << ", par_scatter=" << r.soa_parallel_scatter_ms;
+      }
+      timings << ", total=" << r.soa_timings.total_step_ms;
       std::cout << timings.str() << '\n';
 
       if (!r.soa_debug_summary.empty()) {

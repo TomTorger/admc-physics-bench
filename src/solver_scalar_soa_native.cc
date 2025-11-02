@@ -1,5 +1,7 @@
 #include "solver_scalar_soa_native.hpp"
 
+#include "concurrency/task_pool.hpp"
+
 #include "platform.hpp"
 #include "solver/thread_scratch.hpp"
 #include "soa_pack.hpp"
@@ -7,8 +9,13 @@
 #include "types.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstring>
+#include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -96,6 +103,44 @@ inline void apply_impulse_to_body(const RigidBody& body,
   state.wx[static_cast<std::size_t>(index)] += delta_w.x;
   state.wy[static_cast<std::size_t>(index)] += delta_w.y;
   state.wz[static_cast<std::size_t>(index)] += delta_w.z;
+}
+
+struct ContactBatch;
+struct BatchColoring;
+
+BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
+                                    int body_count);
+
+double solve_normal_batch(ContactBatch& batch,
+                          BodySoA& body_state,
+                          SolverDebugInfo* debug_info);
+
+double solve_friction_batch(ContactBatch& batch,
+                            BodySoA& body_state,
+                            SolverDebugInfo* debug_info);
+
+inline double clamp_tangent(double jt1,
+                            double jt2,
+                            double limit,
+                            double limit_sq,
+                            bool* clamped);
+
+admc::TaskPool& native_solver_pool(unsigned requested_threads) {
+  struct Holder {
+    std::mutex mutex;
+    std::unique_ptr<admc::TaskPool> pool;
+    unsigned threads = 0;
+  };
+  static Holder holder;
+
+  const unsigned desired = std::max(1u, requested_threads);
+  std::lock_guard<std::mutex> lock(holder.mutex);
+  if (!holder.pool || holder.threads != desired) {
+    holder.pool.reset();
+    holder.pool = std::make_unique<admc::TaskPool>(desired);
+    holder.threads = desired;
+  }
+  return *holder.pool;
 }
 
 #if ADMC_HAS_AVX2
@@ -320,6 +365,372 @@ inline void compute_relative_velocities(ContactBatch& batch,
     batch.wBy[lane] = body_state.wy[ib];
     batch.wBz[lane] = body_state.wz[ib];
   }
+}
+
+struct BatchColoring {
+  std::vector<int> batch_color;
+  std::vector<std::vector<int>> batches_per_color;
+  std::vector<char> color_has_friction;
+};
+
+BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
+                                    int body_count) {
+  BatchColoring result;
+  const std::size_t batch_count = batches.size();
+  result.batch_color.assign(batch_count, -1);
+  if (batch_count == 0 || body_count <= 0) {
+    return result;
+  }
+
+  std::vector<std::vector<int>> body_colors(static_cast<std::size_t>(body_count));
+  std::vector<int> color_stamp;
+  std::vector<int> used_colors;
+  int stamp = 0;
+  int max_color = -1;
+
+  auto mark_color = [&](int color) {
+    if (color < 0) {
+      return;
+    }
+    if (static_cast<std::size_t>(color) >= color_stamp.size()) {
+      color_stamp.resize(static_cast<std::size_t>(color) + 1, -1);
+    }
+    if (color_stamp[static_cast<std::size_t>(color)] != stamp) {
+      color_stamp[static_cast<std::size_t>(color)] = stamp;
+      used_colors.push_back(color);
+    }
+  };
+
+  for (std::size_t i = 0; i < batch_count; ++i) {
+    const ContactBatch& batch = batches[i];
+    ++stamp;
+    used_colors.clear();
+
+    for (int lane = 0; lane < batch.lanes; ++lane) {
+      const int a = batch.bodyA_index[lane];
+      const int b = batch.bodyB_index[lane];
+      if (a >= 0 && a < body_count) {
+        for (int color : body_colors[static_cast<std::size_t>(a)]) {
+          mark_color(color);
+        }
+      }
+      if (b >= 0 && b < body_count) {
+        for (int color : body_colors[static_cast<std::size_t>(b)]) {
+          mark_color(color);
+        }
+      }
+    }
+
+    int color = 0;
+    while (true) {
+      if (static_cast<std::size_t>(color) >= color_stamp.size()) {
+        color_stamp.resize(static_cast<std::size_t>(color) + 1, -1);
+        break;
+      }
+      if (color_stamp[static_cast<std::size_t>(color)] != stamp) {
+        break;
+      }
+      ++color;
+    }
+
+    result.batch_color[i] = color;
+    max_color = std::max(max_color, color);
+
+    for (int lane = 0; lane < batch.lanes; ++lane) {
+      const int a = batch.bodyA_index[lane];
+      const int b = batch.bodyB_index[lane];
+      if (a >= 0 && a < body_count) {
+        body_colors[static_cast<std::size_t>(a)].push_back(color);
+      }
+      if (b >= 0 && b < body_count) {
+        body_colors[static_cast<std::size_t>(b)].push_back(color);
+      }
+    }
+  }
+
+  if (max_color < 0) {
+    return result;
+  }
+
+  result.batches_per_color.resize(static_cast<std::size_t>(max_color) + 1);
+  result.color_has_friction.resize(static_cast<std::size_t>(max_color) + 1, 0);
+  for (std::size_t i = 0; i < batch_count; ++i) {
+    const int color = result.batch_color[i];
+    if (color < 0) {
+      continue;
+    }
+    result.batches_per_color[static_cast<std::size_t>(color)].push_back(static_cast<int>(i));
+    if (batches[i].has_friction) {
+      result.color_has_friction[static_cast<std::size_t>(color)] = 1;
+    }
+  }
+
+  return result;
+}
+
+double solve_normal_batch(ContactBatch& batch,
+                          BodySoA& body_state,
+                          SolverDebugInfo* debug_info) {
+  VecD dvx_v = VecD::load(batch.dvx);
+  VecD dvy_v = VecD::load(batch.dvy);
+  VecD dvz_v = VecD::load(batch.dvz);
+  VecD nx_v = VecD::load_masked(batch.nx, batch.lanes);
+  VecD ny_v = VecD::load_masked(batch.ny, batch.lanes);
+  VecD nz_v = VecD::load_masked(batch.nz, batch.lanes);
+  VecD wAx_v = VecD::load(batch.wAx);
+  VecD wAy_v = VecD::load(batch.wAy);
+  VecD wAz_v = VecD::load(batch.wAz);
+  VecD wBx_v = VecD::load(batch.wBx);
+  VecD wBy_v = VecD::load(batch.wBy);
+  VecD wBz_v = VecD::load(batch.wBz);
+  VecD raxn_x_v = VecD::load_masked(batch.raxn_x, batch.lanes);
+  VecD raxn_y_v = VecD::load_masked(batch.raxn_y, batch.lanes);
+  VecD raxn_z_v = VecD::load_masked(batch.raxn_z, batch.lanes);
+  VecD rbxn_x_v = VecD::load_masked(batch.rbxn_x, batch.lanes);
+  VecD rbxn_y_v = VecD::load_masked(batch.rbxn_y, batch.lanes);
+  VecD rbxn_z_v = VecD::load_masked(batch.rbxn_z, batch.lanes);
+
+  VecD wA_dot_raxn = add(mul(wAx_v, raxn_x_v),
+                         add(mul(wAy_v, raxn_y_v), mul(wAz_v, raxn_z_v)));
+  VecD wB_dot_rbxn = add(mul(wBx_v, rbxn_x_v),
+                         add(mul(wBy_v, rbxn_y_v), mul(wBz_v, rbxn_z_v)));
+
+  VecD v_rel_n = add(add(mul(nx_v, dvx_v), mul(ny_v, dvy_v)),
+                     mul(nz_v, dvz_v));
+  v_rel_n = add(v_rel_n, sub(wB_dot_rbxn, wA_dot_raxn));
+
+  VecD bias_v = VecD::load_masked(batch.bias, batch.lanes);
+  VecD bounce_v = VecD::load_masked(batch.bounce, batch.lanes);
+  VecD inv_kn_v = VecD::load_masked(batch.inv_k_n, batch.lanes);
+  VecD jn_old_v = VecD::load_masked(batch.jn, batch.lanes);
+
+  VecD rhs = add(negate(add(v_rel_n, bias_v)), bounce_v);
+  VecD jn_candidate_v = add(jn_old_v, mul(rhs, inv_kn_v));
+  VecD zero_v = VecD::broadcast(0.0);
+  VecD jn_clamped_v = max(jn_candidate_v, zero_v);
+
+  jn_candidate_v.store(batch.jn_pre_clamp);
+  jn_clamped_v.store(batch.jn_new);
+
+  double max_delta = 0.0;
+  for (int lane = 0; lane < batch.lanes; ++lane) {
+    if (!batch.lane_valid[lane]) {
+      batch.jn[lane] = 0.0;
+      batch.jt1[lane] = 0.0;
+      batch.jt2[lane] = 0.0;
+      continue;
+    }
+
+    const double jn_pre = batch.jn_pre_clamp[lane];
+    double jn_new = batch.jn_new[lane];
+    if (jn_pre < 0.0) {
+      if (debug_info) {
+        ++debug_info->normal_impulse_clamps;
+      }
+      jn_new = 0.0;
+    }
+
+    const double applied = jn_new - batch.jn[lane];
+    max_delta = std::max(max_delta, std::fabs(applied));
+    batch.jn[lane] = jn_new;
+
+    if (std::fabs(applied) > math::kEps) {
+      const double impulse_x = applied * batch.nx[lane];
+      const double impulse_y = applied * batch.ny[lane];
+      const double impulse_z = applied * batch.nz[lane];
+      const int ia = batch.bodyA_index[lane];
+      const int ib = batch.bodyB_index[lane];
+      const double inv_mass_a = batch.invMassA[lane];
+      const double inv_mass_b = batch.invMassB[lane];
+      const double delta_vax = -impulse_x * inv_mass_a;
+      const double delta_vay = -impulse_y * inv_mass_a;
+      const double delta_vaz = -impulse_z * inv_mass_a;
+      const double delta_vbx = impulse_x * inv_mass_b;
+      const double delta_vby = impulse_y * inv_mass_b;
+      const double delta_vbz = impulse_z * inv_mass_b;
+
+      const double delta_wax = -applied * batch.TWn_a_x[lane];
+      const double delta_way = -applied * batch.TWn_a_y[lane];
+      const double delta_waz = -applied * batch.TWn_a_z[lane];
+      const double delta_wbx = applied * batch.TWn_b_x[lane];
+      const double delta_wby = applied * batch.TWn_b_y[lane];
+      const double delta_wbz = applied * batch.TWn_b_z[lane];
+
+      body_state.vx[ia] += delta_vax;
+      body_state.vy[ia] += delta_vay;
+      body_state.vz[ia] += delta_vaz;
+      body_state.vx[ib] += delta_vbx;
+      body_state.vy[ib] += delta_vby;
+      body_state.vz[ib] += delta_vbz;
+
+      body_state.wx[ia] += delta_wax;
+      body_state.wy[ia] += delta_way;
+      body_state.wz[ia] += delta_waz;
+      body_state.wx[ib] += delta_wbx;
+      body_state.wy[ib] += delta_wby;
+      body_state.wz[ib] += delta_wbz;
+
+      apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
+                       delta_way, delta_waz);
+      apply_body_delta(batch, ib, delta_vbx, delta_vby, delta_vbz, delta_wbx,
+                       delta_wby, delta_wbz);
+    }
+  }
+
+  return max_delta;
+}
+
+double solve_friction_batch(ContactBatch& batch,
+                            BodySoA& body_state,
+                            SolverDebugInfo* debug_info) {
+  if (!batch.has_friction) {
+    return 0.0;
+  }
+
+  VecD dvx_v = VecD::load(batch.dvx);
+  VecD dvy_v = VecD::load(batch.dvy);
+  VecD dvz_v = VecD::load(batch.dvz);
+  VecD wAx_v = VecD::load(batch.wAx);
+  VecD wAy_v = VecD::load(batch.wAy);
+  VecD wAz_v = VecD::load(batch.wAz);
+  VecD wBx_v = VecD::load(batch.wBx);
+  VecD wBy_v = VecD::load(batch.wBy);
+  VecD wBz_v = VecD::load(batch.wBz);
+
+  VecD t1x_v = VecD::load_masked(batch.t1x, batch.lanes);
+  VecD t1y_v = VecD::load_masked(batch.t1y, batch.lanes);
+  VecD t1z_v = VecD::load_masked(batch.t1z, batch.lanes);
+  VecD t2x_v = VecD::load_masked(batch.t2x, batch.lanes);
+  VecD t2y_v = VecD::load_masked(batch.t2y, batch.lanes);
+  VecD t2z_v = VecD::load_masked(batch.t2z, batch.lanes);
+
+  VecD raxt1_x_v = VecD::load_masked(batch.raxt1_x, batch.lanes);
+  VecD raxt1_y_v = VecD::load_masked(batch.raxt1_y, batch.lanes);
+  VecD raxt1_z_v = VecD::load_masked(batch.raxt1_z, batch.lanes);
+  VecD rbxt1_x_v = VecD::load_masked(batch.rbxt1_x, batch.lanes);
+  VecD rbxt1_y_v = VecD::load_masked(batch.rbxt1_y, batch.lanes);
+  VecD rbxt1_z_v = VecD::load_masked(batch.rbxt1_z, batch.lanes);
+  VecD raxt2_x_v = VecD::load_masked(batch.raxt2_x, batch.lanes);
+  VecD raxt2_y_v = VecD::load_masked(batch.raxt2_y, batch.lanes);
+  VecD raxt2_z_v = VecD::load_masked(batch.raxt2_z, batch.lanes);
+  VecD rbxt2_x_v = VecD::load_masked(batch.rbxt2_x, batch.lanes);
+  VecD rbxt2_y_v = VecD::load_masked(batch.rbxt2_y, batch.lanes);
+  VecD rbxt2_z_v = VecD::load_masked(batch.rbxt2_z, batch.lanes);
+
+  VecD wA_dot_raxt1 = add(mul(wAx_v, raxt1_x_v),
+                          add(mul(wAy_v, raxt1_y_v), mul(wAz_v, raxt1_z_v)));
+  VecD wB_dot_rbxt1 = add(mul(wBx_v, rbxt1_x_v),
+                          add(mul(wBy_v, rbxt1_y_v), mul(wBz_v, rbxt1_z_v)));
+  VecD wA_dot_raxt2 = add(mul(wAx_v, raxt2_x_v),
+                          add(mul(wAy_v, raxt2_y_v), mul(wAz_v, raxt2_z_v)));
+  VecD wB_dot_rbxt2 = add(mul(wBx_v, rbxt2_x_v),
+                          add(mul(wBy_v, rbxt2_y_v), mul(wBz_v, rbxt2_z_v)));
+
+  VecD t1_rel = add(add(mul(t1x_v, dvx_v), mul(t1y_v, dvy_v)),
+                    mul(t1z_v, dvz_v));
+  VecD t2_rel = add(add(mul(t2x_v, dvx_v), mul(t2y_v, dvy_v)),
+                    mul(t2z_v, dvz_v));
+  t1_rel = add(t1_rel, sub(wB_dot_rbxt1, wA_dot_raxt1));
+  t2_rel = add(t2_rel, sub(wB_dot_rbxt2, wA_dot_raxt2));
+  t1_rel.store(batch.rel_t1);
+  t2_rel.store(batch.rel_t2);
+
+  VecD inv_kt1_v = VecD::load_masked(batch.inv_k_t1, batch.lanes);
+  VecD inv_kt2_v = VecD::load_masked(batch.inv_k_t2, batch.lanes);
+  VecD jt1_old_v = VecD::load_masked(batch.jt1, batch.lanes);
+  VecD jt2_old_v = VecD::load_masked(batch.jt2, batch.lanes);
+
+  VecD jt1_candidate_v = sub(jt1_old_v, mul(t1_rel, inv_kt1_v));
+  VecD jt2_candidate_v = sub(jt2_old_v, mul(t2_rel, inv_kt2_v));
+  jt1_candidate_v.store(batch.jt1_candidate);
+  jt2_candidate_v.store(batch.jt2_candidate);
+
+  double max_delta = 0.0;
+  for (int lane = 0; lane < batch.lanes; ++lane) {
+    if (!batch.lane_valid[lane]) {
+      continue;
+    }
+    double jt1_new = batch.jt1_candidate[lane];
+    double jt2_new = batch.jt2_candidate[lane];
+    bool clamped = false;
+    const double limit = batch.mu[lane] * std::max(batch.jn[lane], 0.0);
+    const double vt1 = batch.rel_t1[lane];
+    const double vt2 = batch.rel_t2[lane];
+    const double vt_sq = vt1 * vt1 + vt2 * vt2;
+    if (limit <= 0.0) {
+      jt1_new = 0.0;
+      jt2_new = 0.0;
+    } else if (vt_sq < kStaticFrictionSpeedThresholdSq) {
+      jt1_new = 0.0;
+      jt2_new = 0.0;
+    }
+
+    const double limit_sq = limit * limit;
+    const double scale =
+        clamp_tangent(jt1_new, jt2_new, limit, limit_sq, &clamped);
+    if (clamped && debug_info) {
+      ++debug_info->tangent_projections;
+    }
+    jt1_new *= scale;
+    jt2_new *= scale;
+
+    const double dj1 = jt1_new - batch.jt1[lane];
+    const double dj2 = jt2_new - batch.jt2[lane];
+    const double delta_t_mag = std::sqrt(dj1 * dj1 + dj2 * dj2);
+    max_delta = std::max(max_delta, delta_t_mag);
+    batch.jt1[lane] = jt1_new;
+    batch.jt2[lane] = jt2_new;
+    if (std::fabs(dj1) > math::kEps || std::fabs(dj2) > math::kEps) {
+      const int ia = batch.bodyA_index[lane];
+      const int ib = batch.bodyB_index[lane];
+      const double impulse_x = dj1 * batch.t1x[lane] + dj2 * batch.t2x[lane];
+      const double impulse_y = dj1 * batch.t1y[lane] + dj2 * batch.t2y[lane];
+      const double impulse_z = dj1 * batch.t1z[lane] + dj2 * batch.t2z[lane];
+
+      const double inv_mass_a = batch.invMassA[lane];
+      const double inv_mass_b = batch.invMassB[lane];
+      const double delta_vax = -impulse_x * inv_mass_a;
+      const double delta_vay = -impulse_y * inv_mass_a;
+      const double delta_vaz = -impulse_z * inv_mass_a;
+      const double delta_vbx = impulse_x * inv_mass_b;
+      const double delta_vby = impulse_y * inv_mass_b;
+      const double delta_vbz = impulse_z * inv_mass_b;
+
+      const double delta_wax =
+          -(dj1 * batch.TWt1_a_x[lane] + dj2 * batch.TWt2_a_x[lane]);
+      const double delta_way =
+          -(dj1 * batch.TWt1_a_y[lane] + dj2 * batch.TWt2_a_y[lane]);
+      const double delta_waz =
+          -(dj1 * batch.TWt1_a_z[lane] + dj2 * batch.TWt2_a_z[lane]);
+      const double delta_wbx =
+          dj1 * batch.TWt1_b_x[lane] + dj2 * batch.TWt2_b_x[lane];
+      const double delta_wby =
+          dj1 * batch.TWt1_b_y[lane] + dj2 * batch.TWt2_b_y[lane];
+      const double delta_wbz =
+          dj1 * batch.TWt1_b_z[lane] + dj2 * batch.TWt2_b_z[lane];
+
+      body_state.vx[ia] += delta_vax;
+      body_state.vy[ia] += delta_vay;
+      body_state.vz[ia] += delta_vaz;
+      body_state.vx[ib] += delta_vbx;
+      body_state.vy[ib] += delta_vby;
+      body_state.vz[ib] += delta_vbz;
+
+      body_state.wx[ia] += delta_wax;
+      body_state.wy[ia] += delta_way;
+      body_state.wz[ia] += delta_waz;
+      body_state.wx[ib] += delta_wbx;
+      body_state.wy[ib] += delta_wby;
+      body_state.wz[ib] += delta_wbz;
+
+      apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
+                       delta_way, delta_waz);
+      apply_body_delta(batch, ib, delta_vbx, delta_vby, delta_vbz, delta_wbx,
+                       delta_wby, delta_wbz);
+    }
+  }
+
+  return max_delta;
 }
 
 inline double clamp_tangent(double jt1,
@@ -613,268 +1024,148 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
     }
   }
 
+
+#if defined(ADMC_ENABLE_PARALLEL) && !defined(ADMC_DETERMINISTIC)
+  const bool allow_parallel = params.use_threads && params.thread_count > 1;
+#else
+  const bool allow_parallel = false;
+#endif
+  BatchColoring color_data;
+  admc::TaskPool* pool = nullptr;
+  unsigned worker_count = 1;
+  std::vector<SolverDebugInfo> worker_debug;
+  if (allow_parallel) {
+    color_data =
+        color_contact_batches(contact_batches,
+                              static_cast<int>(body_state.vx.size()));
+    if (!color_data.batches_per_color.empty()) {
+      pool = &native_solver_pool(static_cast<unsigned>(params.thread_count));
+      worker_count = std::max(1u, pool->worker_count());
+      if (debug_info) {
+        worker_debug.resize(worker_count);
+      }
+    }
+  }
+
   const double convergence_threshold = params.convergence_threshold;
   const bool use_convergence = convergence_threshold > 0.0;
   for (int iter = 0; iter < iterations; ++iter) {
     double normal_max_delta = 0.0;
     double friction_max_delta = 0.0;
-    {
+    const bool parallel_ready =
+        allow_parallel && pool && !color_data.batches_per_color.empty();
+
+    if (!parallel_ready) {
       ScopedAccumulator normal_timer(&stats.normal_ms);
       for (ContactBatch& batch : contact_batches) {
-        VecD dvx_v = VecD::load(batch.dvx);
-        VecD dvy_v = VecD::load(batch.dvy);
-        VecD dvz_v = VecD::load(batch.dvz);
-        VecD nx_v = VecD::load_masked(batch.nx, batch.lanes);
-        VecD ny_v = VecD::load_masked(batch.ny, batch.lanes);
-        VecD nz_v = VecD::load_masked(batch.nz, batch.lanes);
-        VecD wAx_v = VecD::load(batch.wAx);
-        VecD wAy_v = VecD::load(batch.wAy);
-        VecD wAz_v = VecD::load(batch.wAz);
-        VecD wBx_v = VecD::load(batch.wBx);
-        VecD wBy_v = VecD::load(batch.wBy);
-        VecD wBz_v = VecD::load(batch.wBz);
-        VecD raxn_x_v = VecD::load_masked(batch.raxn_x, batch.lanes);
-        VecD raxn_y_v = VecD::load_masked(batch.raxn_y, batch.lanes);
-        VecD raxn_z_v = VecD::load_masked(batch.raxn_z, batch.lanes);
-        VecD rbxn_x_v = VecD::load_masked(batch.rbxn_x, batch.lanes);
-        VecD rbxn_y_v = VecD::load_masked(batch.rbxn_y, batch.lanes);
-        VecD rbxn_z_v = VecD::load_masked(batch.rbxn_z, batch.lanes);
-
-      VecD wA_dot_raxn = add(mul(wAx_v, raxn_x_v),
-                              add(mul(wAy_v, raxn_y_v), mul(wAz_v, raxn_z_v)));
-      VecD wB_dot_rbxn = add(mul(wBx_v, rbxn_x_v),
-                              add(mul(wBy_v, rbxn_y_v), mul(wBz_v, rbxn_z_v)));
-
-      VecD v_rel_n = add(add(mul(nx_v, dvx_v), mul(ny_v, dvy_v)),
-                         mul(nz_v, dvz_v));
-      v_rel_n = add(v_rel_n, sub(wB_dot_rbxn, wA_dot_raxn));
-
-        VecD bias_v = VecD::load_masked(batch.bias, batch.lanes);
-        VecD bounce_v = VecD::load_masked(batch.bounce, batch.lanes);
-        VecD inv_kn_v = VecD::load_masked(batch.inv_k_n, batch.lanes);
-        VecD jn_old_v = VecD::load_masked(batch.jn, batch.lanes);
-
-        VecD rhs = add(negate(add(v_rel_n, bias_v)), bounce_v);
-        VecD jn_candidate_v = add(jn_old_v, mul(rhs, inv_kn_v));
-        VecD zero_v = VecD::broadcast(0.0);
-        VecD jn_clamped_v = max(jn_candidate_v, zero_v);
-
-        jn_candidate_v.store(batch.jn_pre_clamp);
-        jn_clamped_v.store(batch.jn_new);
-
-        for (int lane = 0; lane < batch.lanes; ++lane) {
-          if (!batch.lane_valid[lane]) {
-            batch.jn[lane] = 0.0;
-            batch.jt1[lane] = 0.0;
-            batch.jt2[lane] = 0.0;
-            continue;
-          }
-
-          const double jn_pre = batch.jn_pre_clamp[lane];
-          double jn_new = batch.jn_new[lane];
-          if (jn_pre < 0.0) {
-            if (debug_info) {
-              ++debug_info->normal_impulse_clamps;
-            }
-            jn_new = 0.0;
-          }
-
-          const double applied = jn_new - batch.jn[lane];
-          normal_max_delta = std::max(normal_max_delta, std::fabs(applied));
-          batch.jn[lane] = jn_new;
-
-          if (std::fabs(applied) > math::kEps) {
-            const double impulse_x = applied * batch.nx[lane];
-            const double impulse_y = applied * batch.ny[lane];
-            const double impulse_z = applied * batch.nz[lane];
-            const int ia = batch.bodyA_index[lane];
-            const int ib = batch.bodyB_index[lane];
-            const double inv_mass_a = batch.invMassA[lane];
-            const double inv_mass_b = batch.invMassB[lane];
-            const double delta_vax = -impulse_x * inv_mass_a;
-            const double delta_vay = -impulse_y * inv_mass_a;
-            const double delta_vaz = -impulse_z * inv_mass_a;
-            const double delta_vbx = impulse_x * inv_mass_b;
-            const double delta_vby = impulse_y * inv_mass_b;
-            const double delta_vbz = impulse_z * inv_mass_b;
-
-            const double delta_wax = -applied * batch.TWn_a_x[lane];
-            const double delta_way = -applied * batch.TWn_a_y[lane];
-            const double delta_waz = -applied * batch.TWn_a_z[lane];
-            const double delta_wbx = applied * batch.TWn_b_x[lane];
-            const double delta_wby = applied * batch.TWn_b_y[lane];
-            const double delta_wbz = applied * batch.TWn_b_z[lane];
-
-            body_state.vx[ia] += delta_vax;
-            body_state.vy[ia] += delta_vay;
-            body_state.vz[ia] += delta_vaz;
-            body_state.vx[ib] += delta_vbx;
-            body_state.vy[ib] += delta_vby;
-            body_state.vz[ib] += delta_vbz;
-
-            body_state.wx[ia] += delta_wax;
-            body_state.wy[ia] += delta_way;
-            body_state.wz[ia] += delta_waz;
-            body_state.wx[ib] += delta_wbx;
-            body_state.wy[ib] += delta_wby;
-            body_state.wz[ib] += delta_wbz;
-
-            apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
-                             delta_way, delta_waz);
-            apply_body_delta(batch, ib, delta_vbx, delta_vby, delta_vbz, delta_wbx,
-                             delta_wby, delta_wbz);
+        normal_max_delta = std::max(
+            normal_max_delta,
+            solve_normal_batch(batch, body_state, debug_info));
+      }
+    } else {
+      ScopedAccumulator normal_timer(&stats.normal_ms);
+      for (std::size_t color = 0;
+           color < color_data.batches_per_color.size(); ++color) {
+        const auto& bucket = color_data.batches_per_color[color];
+        if (bucket.empty()) {
+          continue;
+        }
+        std::atomic<std::size_t> cursor{0};
+        std::vector<double> local_max(worker_count, 0.0);
+        if (debug_info) {
+          for (auto& dbg : worker_debug) {
+            dbg.reset();
           }
         }
+        for (unsigned w = 0; w < worker_count; ++w) {
+          pool->enqueue([&, w]() {
+            double max_delta = 0.0;
+            SolverDebugInfo* dbg =
+                debug_info ? &worker_debug[w] : nullptr;
+            while (true) {
+              const std::size_t idx =
+                  cursor.fetch_add(1, std::memory_order_relaxed);
+              if (idx >= bucket.size()) {
+                break;
+              }
+              ContactBatch& batch =
+                  contact_batches[static_cast<std::size_t>(bucket[idx])];
+              max_delta = std::max(
+                  max_delta, solve_normal_batch(batch, body_state, dbg));
+            }
+            local_max[w] = max_delta;
+          });
+        }
+        pool->wait_idle();
+        if (debug_info) {
+          for (const auto& dbg : worker_debug) {
+            debug_info->accumulate(dbg);
+          }
+        }
+        double color_max = 0.0;
+        for (double value : local_max) {
+          color_max = std::max(color_max, value);
+        }
+        normal_max_delta = std::max(normal_max_delta, color_max);
       }
     }
 
-    {
+    if (!parallel_ready) {
       ScopedAccumulator friction_timer(&stats.friction_ms);
       for (ContactBatch& batch : contact_batches) {
-        if (!batch.has_friction) {
+        friction_max_delta = std::max(
+            friction_max_delta,
+            solve_friction_batch(batch, body_state, debug_info));
+      }
+    } else {
+      ScopedAccumulator friction_timer(&stats.friction_ms);
+      for (std::size_t color = 0;
+           color < color_data.batches_per_color.size(); ++color) {
+        if (!color_data.color_has_friction.empty() &&
+            !color_data.color_has_friction[color]) {
           continue;
         }
-        VecD dvx_v = VecD::load(batch.dvx);
-        VecD dvy_v = VecD::load(batch.dvy);
-        VecD dvz_v = VecD::load(batch.dvz);
-        VecD wAx_v = VecD::load(batch.wAx);
-        VecD wAy_v = VecD::load(batch.wAy);
-        VecD wAz_v = VecD::load(batch.wAz);
-        VecD wBx_v = VecD::load(batch.wBx);
-        VecD wBy_v = VecD::load(batch.wBy);
-        VecD wBz_v = VecD::load(batch.wBz);
-
-        VecD t1x_v = VecD::load_masked(batch.t1x, batch.lanes);
-        VecD t1y_v = VecD::load_masked(batch.t1y, batch.lanes);
-        VecD t1z_v = VecD::load_masked(batch.t1z, batch.lanes);
-        VecD t2x_v = VecD::load_masked(batch.t2x, batch.lanes);
-        VecD t2y_v = VecD::load_masked(batch.t2y, batch.lanes);
-        VecD t2z_v = VecD::load_masked(batch.t2z, batch.lanes);
-
-        VecD raxt1_x_v = VecD::load_masked(batch.raxt1_x, batch.lanes);
-        VecD raxt1_y_v = VecD::load_masked(batch.raxt1_y, batch.lanes);
-        VecD raxt1_z_v = VecD::load_masked(batch.raxt1_z, batch.lanes);
-        VecD rbxt1_x_v = VecD::load_masked(batch.rbxt1_x, batch.lanes);
-        VecD rbxt1_y_v = VecD::load_masked(batch.rbxt1_y, batch.lanes);
-        VecD rbxt1_z_v = VecD::load_masked(batch.rbxt1_z, batch.lanes);
-        VecD raxt2_x_v = VecD::load_masked(batch.raxt2_x, batch.lanes);
-        VecD raxt2_y_v = VecD::load_masked(batch.raxt2_y, batch.lanes);
-        VecD raxt2_z_v = VecD::load_masked(batch.raxt2_z, batch.lanes);
-        VecD rbxt2_x_v = VecD::load_masked(batch.rbxt2_x, batch.lanes);
-        VecD rbxt2_y_v = VecD::load_masked(batch.rbxt2_y, batch.lanes);
-        VecD rbxt2_z_v = VecD::load_masked(batch.rbxt2_z, batch.lanes);
-
-        VecD wA_dot_raxt1 = add(mul(wAx_v, raxt1_x_v),
-                                add(mul(wAy_v, raxt1_y_v), mul(wAz_v, raxt1_z_v)));
-        VecD wB_dot_rbxt1 = add(mul(wBx_v, rbxt1_x_v),
-                                add(mul(wBy_v, rbxt1_y_v), mul(wBz_v, rbxt1_z_v)));
-        VecD wA_dot_raxt2 = add(mul(wAx_v, raxt2_x_v),
-                                add(mul(wAy_v, raxt2_y_v), mul(wAz_v, raxt2_z_v)));
-        VecD wB_dot_rbxt2 = add(mul(wBx_v, rbxt2_x_v),
-                                add(mul(wBy_v, rbxt2_y_v), mul(wBz_v, rbxt2_z_v)));
-
-        VecD t1_rel = add(add(mul(t1x_v, dvx_v), mul(t1y_v, dvy_v)),
-                          mul(t1z_v, dvz_v));
-        VecD t2_rel = add(add(mul(t2x_v, dvx_v), mul(t2y_v, dvy_v)),
-                          mul(t2z_v, dvz_v));
-        t1_rel = add(t1_rel, sub(wB_dot_rbxt1, wA_dot_raxt1));
-        t2_rel = add(t2_rel, sub(wB_dot_rbxt2, wA_dot_raxt2));
-        t1_rel.store(batch.rel_t1);
-        t2_rel.store(batch.rel_t2);
-
-        VecD inv_kt1_v = VecD::load_masked(batch.inv_k_t1, batch.lanes);
-        VecD inv_kt2_v = VecD::load_masked(batch.inv_k_t2, batch.lanes);
-        VecD jt1_old_v = VecD::load_masked(batch.jt1, batch.lanes);
-        VecD jt2_old_v = VecD::load_masked(batch.jt2, batch.lanes);
-
-        VecD jt1_candidate_v = sub(jt1_old_v, mul(t1_rel, inv_kt1_v));
-        VecD jt2_candidate_v = sub(jt2_old_v, mul(t2_rel, inv_kt2_v));
-        jt1_candidate_v.store(batch.jt1_candidate);
-        jt2_candidate_v.store(batch.jt2_candidate);
-
-        for (int lane = 0; lane < batch.lanes; ++lane) {
-          if (!batch.lane_valid[lane]) {
-            continue;
-          }
-          double jt1_new = batch.jt1_candidate[lane];
-          double jt2_new = batch.jt2_candidate[lane];
-          bool clamped = false;
-          const double limit = batch.mu[lane] * std::max(batch.jn[lane], 0.0);
-          const double vt1 = batch.rel_t1[lane];
-          const double vt2 = batch.rel_t2[lane];
-          const double vt_sq = vt1 * vt1 + vt2 * vt2;
-          if (limit <= 0.0) {
-            jt1_new = 0.0;
-            jt2_new = 0.0;
-          } else if (vt_sq < kStaticFrictionSpeedThresholdSq) {
-            jt1_new = 0.0;
-            jt2_new = 0.0;
-          }
-
-          const double limit_sq = limit * limit;
-          const double scale =
-              clamp_tangent(jt1_new, jt2_new, limit, limit_sq, &clamped);
-          if (clamped && debug_info) {
-            ++debug_info->tangent_projections;
-          }
-          jt1_new *= scale;
-          jt2_new *= scale;
-
-          const double dj1 = jt1_new - batch.jt1[lane];
-          const double dj2 = jt2_new - batch.jt2[lane];
-          const double delta_t_mag = std::sqrt(dj1 * dj1 + dj2 * dj2);
-          friction_max_delta = std::max(friction_max_delta, delta_t_mag);
-          batch.jt1[lane] = jt1_new;
-          batch.jt2[lane] = jt2_new;
-          if (std::fabs(dj1) > math::kEps || std::fabs(dj2) > math::kEps) {
-            const int ia = batch.bodyA_index[lane];
-            const int ib = batch.bodyB_index[lane];
-            const double impulse_x = dj1 * batch.t1x[lane] + dj2 * batch.t2x[lane];
-            const double impulse_y = dj1 * batch.t1y[lane] + dj2 * batch.t2y[lane];
-            const double impulse_z = dj1 * batch.t1z[lane] + dj2 * batch.t2z[lane];
-
-            const double inv_mass_a = batch.invMassA[lane];
-            const double inv_mass_b = batch.invMassB[lane];
-            const double delta_vax = -impulse_x * inv_mass_a;
-            const double delta_vay = -impulse_y * inv_mass_a;
-            const double delta_vaz = -impulse_z * inv_mass_a;
-            const double delta_vbx = impulse_x * inv_mass_b;
-            const double delta_vby = impulse_y * inv_mass_b;
-            const double delta_vbz = impulse_z * inv_mass_b;
-
-            const double delta_wax =
-                -(dj1 * batch.TWt1_a_x[lane] + dj2 * batch.TWt2_a_x[lane]);
-            const double delta_way =
-                -(dj1 * batch.TWt1_a_y[lane] + dj2 * batch.TWt2_a_y[lane]);
-            const double delta_waz =
-                -(dj1 * batch.TWt1_a_z[lane] + dj2 * batch.TWt2_a_z[lane]);
-            const double delta_wbx =
-                dj1 * batch.TWt1_b_x[lane] + dj2 * batch.TWt2_b_x[lane];
-            const double delta_wby =
-                dj1 * batch.TWt1_b_y[lane] + dj2 * batch.TWt2_b_y[lane];
-            const double delta_wbz =
-                dj1 * batch.TWt1_b_z[lane] + dj2 * batch.TWt2_b_z[lane];
-
-            body_state.vx[ia] += delta_vax;
-            body_state.vy[ia] += delta_vay;
-            body_state.vz[ia] += delta_vaz;
-            body_state.vx[ib] += delta_vbx;
-            body_state.vy[ib] += delta_vby;
-            body_state.vz[ib] += delta_vbz;
-
-            body_state.wx[ia] += delta_wax;
-            body_state.wy[ia] += delta_way;
-            body_state.wz[ia] += delta_waz;
-            body_state.wx[ib] += delta_wbx;
-            body_state.wy[ib] += delta_wby;
-            body_state.wz[ib] += delta_wbz;
-
-            apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
-                             delta_way, delta_waz);
-            apply_body_delta(batch, ib, delta_vbx, delta_vby, delta_vbz, delta_wbx,
-                             delta_wby, delta_wbz);
+        const auto& bucket = color_data.batches_per_color[color];
+        if (bucket.empty()) {
+          continue;
+        }
+        std::atomic<std::size_t> cursor{0};
+        std::vector<double> local_max(worker_count, 0.0);
+        if (debug_info) {
+          for (auto& dbg : worker_debug) {
+            dbg.reset();
           }
         }
+        for (unsigned w = 0; w < worker_count; ++w) {
+          pool->enqueue([&, w]() {
+            double max_delta = 0.0;
+            SolverDebugInfo* dbg =
+                debug_info ? &worker_debug[w] : nullptr;
+            while (true) {
+              const std::size_t idx =
+                  cursor.fetch_add(1, std::memory_order_relaxed);
+              if (idx >= bucket.size()) {
+                break;
+              }
+              ContactBatch& batch =
+                  contact_batches[static_cast<std::size_t>(bucket[idx])];
+              max_delta = std::max(
+                  max_delta, solve_friction_batch(batch, body_state, dbg));
+            }
+            local_max[w] = max_delta;
+          });
+        }
+        pool->wait_idle();
+        if (debug_info) {
+          for (const auto& dbg : worker_debug) {
+            debug_info->accumulate(dbg);
+          }
+        }
+        double color_max = 0.0;
+        for (double value : local_max) {
+          color_max = std::max(color_max, value);
+        }
+        friction_max_delta = std::max(friction_max_delta, color_max);
       }
     }
 

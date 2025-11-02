@@ -1,5 +1,8 @@
 #include "contact_gen.hpp"
 
+#include "config/runtime_env.hpp"
+#include "mt/thread_pool.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -129,9 +132,15 @@ bool refresh_contact_from_state_impl(const std::vector<RigidBody>& bodies,
 
 void build_impl(std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
                 const ContactBuildParams& params) {
-  for (Contact& c : contacts) {
+  const std::size_t count = contacts.size();
+  if (count == 0) {
+    return;
+  }
+
+  auto per_contact = [&](std::size_t index) {
+    Contact& c = contacts[index];
     if (!refresh_contact_from_state_impl(bodies, c)) {
-      continue;
+      return;
     }
 
     RigidBody& A = bodies[c.a];
@@ -178,16 +187,43 @@ void build_impl(std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
     c.k_t2 = (k_t2 > math::kEps) ? k_t2 : 1.0;
     c.TWt2_a = Iwa_t2;
     c.TWt2_b = Iwb_t2;
+  };
+
+  auto& pool = admc::mt::ThreadPool::instance();
+  const std::size_t chunk = admc::config::chunk_size();
+  if (pool.size() <= 1 || count <= chunk) {
+    for (std::size_t i = 0; i < count; ++i) {
+      per_contact(i);
+    }
+    return;
   }
+
+  pool.parallel_for(count, per_contact, chunk);
 }
 
 }  // namespace
 
 void refresh_contacts_from_state(const std::vector<RigidBody>& bodies,
                                  std::vector<Contact>& contacts) {
-  for (Contact& c : contacts) {
-    refresh_contact_from_state_impl(bodies, c);
+  const std::size_t count = contacts.size();
+  if (count == 0) {
+    return;
   }
+
+  auto per_contact = [&](std::size_t index) {
+    refresh_contact_from_state_impl(bodies, contacts[index]);
+  };
+
+  auto& pool = admc::mt::ThreadPool::instance();
+  const std::size_t chunk = admc::config::chunk_size();
+  if (pool.size() <= 1 || count <= chunk) {
+    for (std::size_t i = 0; i < count; ++i) {
+      per_contact(i);
+    }
+    return;
+  }
+
+  pool.parallel_for(count, per_contact, chunk);
 }
 
 void build_contact_offsets_and_bias(std::vector<RigidBody>& bodies,

@@ -45,6 +45,29 @@ struct JointSOA {
 
   std::size_t size() const { return a.size(); }
 
+  void ensure_capacity(std::size_t capacity) {
+    if (a.capacity() < capacity) {
+      reserve(capacity);
+    }
+  }
+
+  void clear_but_keep_capacity() {
+    a.resize(0);
+    b.resize(0);
+    d.resize(0);
+    ra.resize(0);
+    rb.resize(0);
+    k.resize(0);
+    gamma.resize(0);
+    bias.resize(0);
+    j.resize(0);
+    rope.resize(0);
+    C.resize(0);
+    rest.resize(0);
+    beta.resize(0);
+    indices.resize(0);
+  }
+
   void clear() {
     a.clear();
     b.clear();
@@ -77,6 +100,23 @@ struct JointSOA {
     rest.reserve(capacity);
     beta.reserve(capacity);
     indices.reserve(capacity);
+  }
+
+  void resize(std::size_t size) {
+    a.resize(size);
+    b.resize(size);
+    d.resize(size);
+    ra.resize(size);
+    rb.resize(size);
+    k.resize(size);
+    gamma.resize(size);
+    bias.resize(size);
+    j.resize(size);
+    rope.resize(size);
+    C.resize(size);
+    rest.resize(size);
+    beta.resize(size);
+    indices.resize(size);
   }
 };
 

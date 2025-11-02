@@ -6,7 +6,9 @@
 namespace admc {
 
 //! Parallel wrapper around the native scalar SoA solver.
-//! Returns true when islands were solved in parallel.
+//! Returns true when this function completed the solve (either in parallel or
+//! via its internal fallback). A false return indicates the caller must invoke
+//! the sequential solver.
 bool solve_scalar_soa_parallel(std::vector<RigidBody>& bodies,
                                std::vector<Contact>& contacts,
                                RowSOA& rows,
@@ -39,4 +41,3 @@ inline bool solve_scalar_soa_native_parallel(std::vector<RigidBody>& bodies,
 }
 
 }  // namespace admc
-

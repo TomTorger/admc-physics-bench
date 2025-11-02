@@ -1,9 +1,16 @@
+#if defined(ADMC_DETERMINISTIC)
+#define ADMC_ALLOW_PARALLEL_IN_BENCH 1
+#endif
+
 #include "bench_cli.hpp"
 #include "bench_runner.hpp"
 #include "bench_output.hpp"
 #include "bench_scenes.hpp"
 #include "bench_utils.hpp"
+#include "config/runtime_env.hpp"
+#include "mt/thread_pool.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 
@@ -12,6 +19,24 @@ int main(int argc, char** argv) {
 
   std::vector<char*> passthrough;
   BenchConfig cfg = parse_cli(argc, argv, passthrough);
+
+  unsigned pool_threads = 1;
+  if (!cfg.deterministic) {
+    if (!cfg.threads_list.empty()) {
+      for (int t : cfg.threads_list) {
+        pool_threads = std::max(pool_threads, static_cast<unsigned>(std::max(1, t)));
+      }
+    } else {
+      pool_threads = std::max(pool_threads, static_cast<unsigned>(std::max(1, cfg.threads)));
+    }
+    pool_threads = std::max(pool_threads, admc::config::thread_count());
+  }
+  admc::mt::ThreadPool::instance().set_parallelism(pool_threads);
+#if defined(ADMC_DETERMINISTIC)
+  if (pool_threads > 1) {
+    std::cout << "[bench] Warning: ADMC_DETERMINISTIC build running with multithreading.\n";
+  }
+#endif
 
   print_header("ADMC Physics Bench", cfg.threads);
 

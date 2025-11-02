@@ -57,6 +57,8 @@ struct SolverDebugInfo {
   int tangent_projections = 0;
   int rope_clamps = 0;
   int singular_joint_denominators = 0;
+  double parallel_stage_ms = 0.0;
+  double parallel_scatter_ms = 0.0;
   SoaTimingBreakdown timings;
 
   void reset() { *this = SolverDebugInfo{}; }
@@ -70,6 +72,8 @@ struct SolverDebugInfo {
     tangent_projections += other.tangent_projections;
     rope_clamps += other.rope_clamps;
     singular_joint_denominators += other.singular_joint_denominators;
+    parallel_stage_ms += other.parallel_stage_ms;
+    parallel_scatter_ms += other.parallel_scatter_ms;
     timings.accumulate(other.timings);
   }
 };

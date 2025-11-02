@@ -176,6 +176,86 @@ struct RowSOA {
 
   std::size_t size() const { return static_cast<std::size_t>(N); }
 
+  void ensure_capacity(std::size_t capacity) {
+    if (a.capacity() < capacity) {
+      reserve(capacity);
+    }
+  }
+
+  void clear_but_keep_capacity() {
+    N = 0;
+    a.resize(0);
+    b.resize(0);
+    nx.resize(0);
+    ny.resize(0);
+    nz.resize(0);
+    t1x.resize(0);
+    t1y.resize(0);
+    t1z.resize(0);
+    t2x.resize(0);
+    t2y.resize(0);
+    t2z.resize(0);
+    rax.resize(0);
+    ray.resize(0);
+    raz.resize(0);
+    rbx.resize(0);
+    rby.resize(0);
+    rbz.resize(0);
+    raxn_x.resize(0);
+    raxn_y.resize(0);
+    raxn_z.resize(0);
+    rbxn_x.resize(0);
+    rbxn_y.resize(0);
+    rbxn_z.resize(0);
+    raxt1_x.resize(0);
+    raxt1_y.resize(0);
+    raxt1_z.resize(0);
+    rbxt1_x.resize(0);
+    rbxt1_y.resize(0);
+    rbxt1_z.resize(0);
+    raxt2_x.resize(0);
+    raxt2_y.resize(0);
+    raxt2_z.resize(0);
+    rbxt2_x.resize(0);
+    rbxt2_y.resize(0);
+    rbxt2_z.resize(0);
+    TWn_a_x.resize(0);
+    TWn_a_y.resize(0);
+    TWn_a_z.resize(0);
+    TWn_b_x.resize(0);
+    TWn_b_y.resize(0);
+    TWn_b_z.resize(0);
+    TWt1_a_x.resize(0);
+    TWt1_a_y.resize(0);
+    TWt1_a_z.resize(0);
+    TWt1_b_x.resize(0);
+    TWt1_b_y.resize(0);
+    TWt1_b_z.resize(0);
+    TWt2_a_x.resize(0);
+    TWt2_a_y.resize(0);
+    TWt2_a_z.resize(0);
+    TWt2_b_x.resize(0);
+    TWt2_b_y.resize(0);
+    TWt2_b_z.resize(0);
+    k_n.resize(0);
+    k_t1.resize(0);
+    k_t2.resize(0);
+    inv_k_n.resize(0);
+    inv_k_t1.resize(0);
+    inv_k_t2.resize(0);
+    mu.resize(0);
+    e.resize(0);
+    bias.resize(0);
+    bounce.resize(0);
+    C.resize(0);
+    jn.resize(0);
+    jt1.resize(0);
+    jt2.resize(0);
+    flags.resize(0);
+    types.resize(0);
+    indices.resize(0);
+  }
+
   void clear() {
     N = 0;
     a.clear();
@@ -321,6 +401,80 @@ struct RowSOA {
     flags.reserve(capacity);
     types.reserve(capacity);
     indices.reserve(capacity);
+  }
+
+  void resize(std::size_t size) {
+    a.resize(size);
+    b.resize(size);
+    nx.resize(size);
+    ny.resize(size);
+    nz.resize(size);
+    t1x.resize(size);
+    t1y.resize(size);
+    t1z.resize(size);
+    t2x.resize(size);
+    t2y.resize(size);
+    t2z.resize(size);
+    rax.resize(size);
+    ray.resize(size);
+    raz.resize(size);
+    rbx.resize(size);
+    rby.resize(size);
+    rbz.resize(size);
+    raxn_x.resize(size);
+    raxn_y.resize(size);
+    raxn_z.resize(size);
+    rbxn_x.resize(size);
+    rbxn_y.resize(size);
+    rbxn_z.resize(size);
+    raxt1_x.resize(size);
+    raxt1_y.resize(size);
+    raxt1_z.resize(size);
+    rbxt1_x.resize(size);
+    rbxt1_y.resize(size);
+    rbxt1_z.resize(size);
+    raxt2_x.resize(size);
+    raxt2_y.resize(size);
+    raxt2_z.resize(size);
+    rbxt2_x.resize(size);
+    rbxt2_y.resize(size);
+    rbxt2_z.resize(size);
+    TWn_a_x.resize(size);
+    TWn_a_y.resize(size);
+    TWn_a_z.resize(size);
+    TWn_b_x.resize(size);
+    TWn_b_y.resize(size);
+    TWn_b_z.resize(size);
+    TWt1_a_x.resize(size);
+    TWt1_a_y.resize(size);
+    TWt1_a_z.resize(size);
+    TWt1_b_x.resize(size);
+    TWt1_b_y.resize(size);
+    TWt1_b_z.resize(size);
+    TWt2_a_x.resize(size);
+    TWt2_a_y.resize(size);
+    TWt2_a_z.resize(size);
+    TWt2_b_x.resize(size);
+    TWt2_b_y.resize(size);
+    TWt2_b_z.resize(size);
+    k_n.resize(size);
+    k_t1.resize(size);
+    k_t2.resize(size);
+    inv_k_n.resize(size);
+    inv_k_t1.resize(size);
+    inv_k_t2.resize(size);
+    mu.resize(size);
+    e.resize(size);
+    bias.resize(size);
+    bounce.resize(size);
+    C.resize(size);
+    jn.resize(size);
+    jt1.resize(size);
+    jt2.resize(size);
+    flags.resize(size);
+    types.resize(size);
+    indices.resize(size);
+    N = static_cast<int>(size);
   }
 };
 

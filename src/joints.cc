@@ -44,8 +44,8 @@ void build_joint_soa(const std::vector<RigidBody>& bodies,
                      const std::vector<DistanceJoint>& joints,
                      double dt,
                      JointSOA& rows) {
-  rows.clear();
-  rows.reserve(joints.size());
+  rows.clear_but_keep_capacity();
+  rows.ensure_capacity(joints.size());
 
   const double dt_sq = (dt > math::kEps) ? (dt * dt) : 0.0;
   const double inv_dt = (dt > math::kEps) ? (1.0 / dt) : 0.0;

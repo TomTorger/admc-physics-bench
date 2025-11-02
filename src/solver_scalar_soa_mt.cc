@@ -281,8 +281,8 @@ void solve_scalar_soa_mt(std::vector<RigidBody>& bodies,
             contacts[static_cast<std::size_t>(global_contact)]);
       }
 
-      buffers.rows.clear();
-      buffers.rows.reserve(island.rows.size());
+      buffers.rows.clear_but_keep_capacity();
+      buffers.rows.ensure_capacity(island.rows.size());
       buffers.row_global_indices.clear();
       buffers.row_global_indices.reserve(island.rows.size());
       for (int global_row : island.rows) {
@@ -297,8 +297,8 @@ void solve_scalar_soa_mt(std::vector<RigidBody>& bodies,
       }
       buffers.rows.N = static_cast<int>(buffers.row_global_indices.size());
 
-      buffers.joints.clear();
-      buffers.joints.reserve(island.joints.size());
+      buffers.joints.clear_but_keep_capacity();
+      buffers.joints.ensure_capacity(island.joints.size());
       buffers.joint_global_indices.clear();
       buffers.joint_global_indices.reserve(island.joints.size());
       for (int joint_index : island.joints) {

@@ -104,7 +104,7 @@ inline void seed_defaults(BenchConfig& cfg,
   }
 
   // Threads sweep defaults
-#if defined(ADMC_DETERMINISTIC)
+#if defined(ADMC_DETERMINISTIC) && !defined(ADMC_ALLOW_PARALLEL_IN_BENCH)
   const bool force_single = true;
 #else
   const bool force_single = cfg.deterministic;

@@ -57,6 +57,8 @@ struct BenchResult {
   bool   simd     = false;
   int    threads  = 1;
   bool   has_soa_timings = false;
+  double soa_parallel_stage_ms = 0.0;
+  double soa_parallel_scatter_ms = 0.0;
   SoaTimingBreakdown soa_timings{};
   std::string soa_debug_summary;
   std::string commit_sha; // not resolved here
@@ -226,8 +228,18 @@ inline BenchResult run_soa_variant(const std::string& scene_name,
     r.has_soa_timings = true;
     r.soa_timings = total;
     r.soa_timings.scale(1.0 / steps);
+    if (agg_dbg.parallel_stage_ms > 0.0) {
+      r.soa_parallel_stage_ms = agg_dbg.parallel_stage_ms / steps;
+    }
+    if (agg_dbg.parallel_scatter_ms > 0.0) {
+      r.soa_parallel_scatter_ms = agg_dbg.parallel_scatter_ms / steps;
+    }
     SolverDebugInfo dbg_avg = agg_dbg;
     dbg_avg.timings = r.soa_timings;
+    if (steps > 0) {
+      dbg_avg.parallel_stage_ms = r.soa_parallel_stage_ms;
+      dbg_avg.parallel_scatter_ms = r.soa_parallel_scatter_ms;
+    }
     r.soa_debug_summary = solver_debug_summary(dbg_avg);
   }
   return r;
