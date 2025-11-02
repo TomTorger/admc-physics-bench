@@ -86,7 +86,7 @@ inline int steps_for_scene_default(const std::string& scene, int fallback_steps)
   return std::max(1, fallback_steps);
 }
 
-enum class SoaVariant { Legacy, Vectorized, Native };
+enum class SoaVariant { Legacy, Vectorized, Native, Parallel };
 
 using SoaSolveFn = void (*)(std::vector<RigidBody>&,
                             std::vector<Contact>&,
@@ -117,6 +117,17 @@ inline SoaSolveFn select_soa_solver(SoaVariant v) {
           solve_scalar_soa_native(bodies, contacts, rows, joints, params, dbg);
         }
       };
+    case SoaVariant::Parallel:
+      return [](auto& bodies, auto& contacts, auto& rows, auto& joints, const SoaParams& params, SolverDebugInfo* dbg) {
+#if defined(ADMC_ENABLE_PARALLEL) && !defined(ADMC_DETERMINISTIC)
+        if (params.use_threads && params.thread_count > 1) {
+          if (admc::solve_scalar_soa_parallel(bodies, contacts, rows, joints, params, dbg)) {
+            return;
+          }
+        }
+#endif
+        solve_scalar_soa_native(bodies, contacts, rows, joints, params, dbg);
+      };
   }
   return nullptr;
 }
@@ -126,6 +137,7 @@ inline const char* solver_label(SoaVariant v) {
     case SoaVariant::Legacy:     return "scalar_soa";
     case SoaVariant::Vectorized: return "vec_soa";
     case SoaVariant::Native:     return "scalar_soa_native";
+    case SoaVariant::Parallel:   return "scalar_soa_parallel";
   }
   return "scalar_soa";
 }
@@ -355,6 +367,8 @@ run_suite_for_scene(const std::string& scene_name,
       do_soa_variant(SoaVariant::Vectorized, /*use_simd*/ false);
     } else if (solver == "soa_native") {
       do_soa_variant(SoaVariant::Native, /*use_simd*/ true);
+    } else if (solver == "soa_parallel") {
+      do_soa_variant(SoaVariant::Parallel, /*use_simd*/ true);
     } else {
       std::cerr << "[bench] Unknown solver: " << solver << "\n";
     }

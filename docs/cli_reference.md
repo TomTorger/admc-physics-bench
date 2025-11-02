@@ -7,7 +7,7 @@ cmake -S . -B build -G Ninja -DADMC_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
 build/bench/bench \
   --scenes spheres_cloud_1024,box_stack_4 \
-  --solvers baseline,cached,soa,soa_native \
+  --solvers baseline,cached,soa,soa_native,soa_parallel \
   --iters 10 --steps 30 --tile-sizes 64,128,256 \
   --csv results/$(date +%Y%m%d)/results.csv
 ```
@@ -67,6 +67,7 @@ Full material, ERP, and timestep settings are tabulated in `docs/scenes.md`.
 | `baseline` | AoS, vector-per-row sequential impulse. | `baseline_vec` |
 | `cached` | Scalar AoS solver with cached effective mass and warm-start. | `scalar_cached` |
 | `soa` | Scalar Structure-of-Arrays batcher (legacy path). | `scalar_soa`, `soa_mt`, `soa_simd` |
+| `soa_parallel` | Island-parallel native solver with work-stealing scheduler. | `scalar_soa_parallel`, `parallel_soa` |
 | `vec_soa` | SIMD-friendly SoA path that currently forwards to scalar kernels. | `scalar_soa_vectorized`, `soa_vec`, `soa_vectorized` |
 | `soa_native` | Fully SoA-native solver with lane-specialized kernels. | `scalar_soa_native`, `native_soa` |
 

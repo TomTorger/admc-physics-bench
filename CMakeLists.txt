@@ -86,7 +86,7 @@ add_library(core
   src/solver_scalar_soa.cpp src/solver_scalar_soa_spheres.cpp
   src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
   src/solver_scalar_soa_native.cc src/solver/islands.cc
-  src/solver/solver_scalar_soa_native_par.cc
+  src/solver/solver_scalar_soa_parallel.cc
   src/solver_scalar_soa_vectorized.cc src/solver_vec_lane.cpp src/soa/tiler.cpp
 )
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

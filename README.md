@@ -28,7 +28,7 @@ cmake -S . -B build -G Ninja -DADMC_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
 mkdir -p results
 build/bench/bench --scene spheres_cloud --sizes 1024,2048,4096,8192 \
-  --iters 10 --steps 30 --solvers baseline,cached,soa,soa_native,vec_soa --tile-sizes 64,128,256 \
+  --iters 10 --steps 30 --solvers baseline,cached,soa,soa_native,soa_parallel,vec_soa --tile-sizes 64,128,256 \
   --csv results/spheres_cloud.csv
 python3 tools/plot_perf.py --inputs results/*.csv --out docs/assets/perf_scaling.svg
 ```
@@ -52,6 +52,7 @@ This repo makes those trade-offs measurable across representative scenes.
 - ✅ **Scalar Cached solver (AoS)** — normal + friction as **scalar rows** with caching & warm-start.
 - ✅ **SoA-batched solver** — same math, **Structure-of-Arrays** for better memory/throughput.
 - ✅ **Fully SoA-native SIMD solver** — keeps bodies/contacts in SoA throughout the loop with SIMD-friendly batches.
+- ✅ **Parallel SoA solver** — island-parallel wrapper with per-island remapping and work-stealing scheduling.
 - ✅ **Vectorized SoA solver** — forwards through the new SIMD-friendly path for upcoming lane-specialized kernels.
 - ✅ **Deterministic scenes** — from two-body cases to particle-like clouds and stacks.
 - ✅ **Metrics** — directional-momentum drift, constraint error, energy drift, cone consistency.
@@ -203,6 +204,12 @@ build/bench/bench --benchmark --benchmark_out="results/${STAMP}/results.csv" --b
 
 * Shares the SoA pipeline while routing through the SIMD-friendly vectorized entrypoint.
 * Currently forwards to the scalar implementation while the dedicated kernels solidify, preserving instrumentation and timings.
+
+### 6) Parallel SoA solver
+
+* Builds island-local SoA buffers with global→local remapping, so the native solver runs entirely on compact body/contact ranges.
+* Uses a cost-aware work-stealing scheduler across threads; automatically falls back to the single-thread path when threading is disabled or unnecessary.
+* Writes warm-start impulses and body state back through the original indices to maintain parity with the single-thread native solver.
 
 ---
 

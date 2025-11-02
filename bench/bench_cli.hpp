@@ -75,7 +75,7 @@ inline double parse_double_default(const std::string& s, double fallback) {
 
 // --- defaults identical to the “quick” suite in the monolith ----------------
 inline std::vector<std::string> default_solvers() {
-  return {"baseline", "cached", "soa", "soa_native", "vec_soa"};
+  return {"baseline", "cached", "soa", "soa_native", "soa_parallel", "vec_soa"};
 }
 inline std::vector<std::string> default_scenes_quick() {
   return {
@@ -132,6 +132,8 @@ inline std::string normalize_solver(std::string s) {
   if (s == "scalar_cached") return "cached";
   if (s == "scalar_soa" || s == "soa_simd" || s == "soa_mt") return "soa";
   if (s == "scalar_soa_native" || s == "soa_native" || s == "native_soa") return "soa_native";
+  if (s == "scalar_soa_parallel" || s == "soa_parallel" || s == "parallel_soa")
+    return "soa_parallel";
   if (s == "scalar_soa_vectorized" || s == "soa_vec" ||
       s == "soa_vectorized" || s == "vec_soa") return "vec_soa";
   if (s == "baseline_vec") return "baseline";
