@@ -1,0 +1,7 @@
+{
+  "cmake.defaultConfigurePreset": "msvc-release",
+  "cmake.defaultBuildPreset": "msvc-release",
+  "cmake.defaultTestPreset": "msvc-release",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.intelliSenseMode": "msvc-x64"
+}

@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure (MSVC)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--preset", "msvc-release"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build (MSVC Release)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "--preset", "msvc-release", "--", "-j"],
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Bench (Release)",
+      "type": "shell",
+      "command": "${workspaceFolder}/build/msvc-release/bench/bench_main.exe",
+      "args": [
+        "--scene",
+        "spheres_cloud",
+        "--sizes",
+        "1024",
+        "--iters",
+        "10",
+        "--steps",
+        "10",
+        "--solvers",
+        "baseline,cached,soa",
+        "--csv",
+        "${workspaceFolder}/results/windows_quick.csv"
+      ],
+      "dependsOn": "Build (MSVC Release)",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    }
+  ]
+}

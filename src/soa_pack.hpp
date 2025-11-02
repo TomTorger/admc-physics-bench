@@ -1,14 +1,16 @@
 #pragma once
 
+#include "platform.hpp"
+
 #include <cstddef>
 #include <cstring>
 
 namespace soa {
 
 constexpr int kLane =
-#if defined(__AVX2__) || defined(ADMC_ENABLE_AVX2)
+#if ADMC_HAS_AVX2
     4
-#elif defined(__ARM_NEON) || defined(ADMC_ENABLE_NEON)
+#elif ADMC_HAS_NEON
     2
 #else
     1

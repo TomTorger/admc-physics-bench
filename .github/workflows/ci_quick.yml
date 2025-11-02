@@ -35,3 +35,24 @@ jobs:
             results/*.csv
             build/bench/*.log
           if-no-files-found: ignore
+
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Ninja
+        run: choco install ninja --yes --no-progress
+
+      - name: Configure (MSVC Release)
+        run: cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j 2
+
+      - name: Tests
+        run: ctest --test-dir build --output-on-failure

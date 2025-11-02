@@ -1506,7 +1506,7 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   }
 #endif
 
-#if defined(ADMC_ENABLE_AVX2) || defined(ADMC_ENABLE_NEON)
+#if ADMC_HAS_AVX2 || ADMC_HAS_NEON
   if (effective.use_simd) {
     solve_scalar_soa_simd(bodies, contacts, rows, joints, effective, debug_info);
     return;
@@ -1546,7 +1546,7 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   }
 #endif
 
-#if defined(ADMC_ENABLE_AVX2) || defined(ADMC_ENABLE_NEON)
+#if ADMC_HAS_AVX2 || ADMC_HAS_NEON
   if (effective.use_simd) {
     solve_scalar_soa_simd(bodies, contacts, rows, effective, debug_info);
     return;

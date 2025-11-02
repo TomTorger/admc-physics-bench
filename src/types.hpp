@@ -1,15 +1,12 @@
 #pragma once
 
 #include "math.hpp"
+#include "platform.hpp"
 
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
 #include <new>
 #include <vector>
-#if defined(_MSC_VER)
-#include <malloc.h>
-#endif
 
 template <typename T, std::size_t Alignment>
 struct AlignedAllocator {
@@ -24,18 +21,7 @@ struct AlignedAllocator {
     if (n == 0) {
       return nullptr;
     }
-#if defined(_MSC_VER)
-    void* ptr = _aligned_malloc(n * sizeof(T), Alignment);
-    if (!ptr) {
-      throw std::bad_alloc();
-    }
-#else
-    void* ptr = nullptr;
-    const int err = posix_memalign(&ptr, Alignment, n * sizeof(T));
-    if (err != 0) {
-      throw std::bad_alloc();
-    }
-#endif
+    void* ptr = admc_aligned_alloc(n * sizeof(T), Alignment);
     return static_cast<T*>(ptr);
   }
 
@@ -43,11 +29,7 @@ struct AlignedAllocator {
     if (!p) {
       return;
     }
-#if defined(_MSC_VER)
-    _aligned_free(p);
-#else
-    std::free(p);
-#endif
+    admc_aligned_free(p);
   }
 
   template <typename U>
