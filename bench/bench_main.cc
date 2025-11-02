@@ -37,6 +37,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -202,6 +203,113 @@ std::vector<std::string> split_csv(const std::string& value) {
   return tokens;
 }
 
+std::filesystem::path resolve_gitdir_file(const std::filesystem::path& git_file) {
+  std::ifstream file(git_file);
+  if (!file) {
+    return {};
+  }
+  std::string line;
+  if (!std::getline(file, line)) {
+    return {};
+  }
+  const std::string prefix = "gitdir:";
+  if (line.rfind(prefix, 0) != 0) {
+    return {};
+  }
+  std::filesystem::path path = trim_copy(line.substr(prefix.size()));
+  if (path.is_relative()) {
+    path = git_file.parent_path() / path;
+  }
+  std::error_code ec;
+  const auto canonical_path = std::filesystem::weakly_canonical(path, ec);
+  return ec ? path : canonical_path;
+}
+
+std::filesystem::path find_git_directory() {
+  namespace fs = std::filesystem;
+  fs::path dir = fs::current_path();
+  for (int depth = 0; depth < 6; ++depth) {
+    const fs::path candidate = dir / ".git";
+    std::error_code ec;
+    if (fs::exists(candidate, ec)) {
+      if (fs::is_directory(candidate, ec)) {
+        return candidate;
+      }
+      const fs::path resolved = resolve_gitdir_file(candidate);
+      if (!resolved.empty()) {
+        return resolved;
+      }
+    }
+    if (!dir.has_parent_path()) {
+      break;
+    }
+    dir = dir.parent_path();
+  }
+  return {};
+}
+
+std::string read_trimmed_line(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file) {
+    return {};
+  }
+  std::string line;
+  if (!std::getline(file, line)) {
+    return {};
+  }
+  return trim_copy(line);
+}
+
+std::string read_git_reference(const std::filesystem::path& git_dir,
+                               const std::string& ref_name) {
+  const std::filesystem::path ref_path = git_dir / ref_name;
+  std::error_code ec;
+  if (std::filesystem::exists(ref_path, ec)) {
+    const std::string sha = read_trimmed_line(ref_path);
+    if (!sha.empty()) {
+      return sha;
+    }
+  }
+
+  const std::filesystem::path packed_refs = git_dir / "packed-refs";
+  std::ifstream packed(packed_refs);
+  if (!packed) {
+    return {};
+  }
+  std::string line;
+  while (std::getline(packed, line)) {
+    if (line.empty() || line[0] == '#' || line[0] == '^') {
+      continue;
+    }
+    const auto space = line.find(' ');
+    if (space == std::string::npos) {
+      continue;
+    }
+    const std::string ref = trim_copy(line.substr(space + 1));
+    if (ref == ref_name) {
+      return trim_copy(line.substr(0, space));
+    }
+  }
+  return {};
+}
+
+std::string git_head_sha_from_filesystem() {
+  const std::filesystem::path git_dir = find_git_directory();
+  if (git_dir.empty()) {
+    return {};
+  }
+  const std::string head = read_trimmed_line(git_dir / "HEAD");
+  if (head.empty()) {
+    return {};
+  }
+  const std::string ref_prefix = "ref:";
+  if (head.rfind(ref_prefix, 0) == 0) {
+    const std::string ref_name = trim_copy(head.substr(ref_prefix.size()));
+    return read_git_reference(git_dir, ref_name);
+  }
+  return head;
+}
+
 std::string current_commit_sha() {
   static std::string cached;
   static bool initialized = false;
@@ -218,12 +326,9 @@ std::string current_commit_sha() {
   if (!cached.empty()) {
     return cached;
   }
-  std::array<char, 64> buffer{};
-  if (FILE* pipe = ::popen("git rev-parse --short HEAD", "r")) {
-    if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
-      cached = trim_copy(buffer.data());
-    }
-    ::pclose(pipe);
+  cached = git_head_sha_from_filesystem();
+  if (cached.size() > 12) {
+    cached = cached.substr(0, 12);
   }
   return cached;
 }
