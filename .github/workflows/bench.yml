@@ -34,14 +34,14 @@ jobs:
         run: |
           mkdir -p results
           for N in 1024 2048 4096 8192; do
-            build/bench/bench_main \
+            build/bench/bench \
               --scene spheres_cloud --sizes $N \
               --iters 10 --steps 30 \
               --solvers baseline,cached,soa \
               --tile-sizes 64,128,256 \
               --csv results/spheres_cloud_${N}.csv
           done
-          build/bench/bench_main \
+          build/bench/bench \
             --scene box_stack_4 --iters 10 --steps 30 \
             --solvers baseline,cached,soa \
             --csv results/box_stack_4.csv

@@ -1,6 +1,6 @@
 # ADMC: Additive Directional Momentum Conservation — Overview & Proof
 
-> This note summarizes the “ADMC” formulation used in this library and sketches the proof that it is **exactly equivalent** to standard special-relativistic conservation of energy and momentum. It also records the non-relativistic limit and the uniqueness result behind the (p_{k^\pm}) representation.
+> This note summarizes the “ADMC” formulation used in this library and sketches the proof that it is **exactly equivalent** to standard special-relativistic conservation of energy and momentum. It also records the non-relativistic limit and the uniqueness result behind the (p_{k^\pm}) representation. For Newtonian contact math and solver formulas, see `docs/nr_math.md`. Bench metric definitions live in `docs/metrics.md`.
 
 ## 1) Setup and notation
 
@@ -113,6 +113,12 @@ Subtracting the rest term and multiplying the even-in-(\mathbf p) part by (c) ex
 * Verify the linear identities in §2 for random test systems; they must hold to machine precision. 
 * For elastic toy problems (2-body head-on), confirm constancy of each (\sum p_{k^\pm}) over the step; differences equal directional momentum; sums equal (2\sum M). 
 * In NR scenes, track the even piece vs (\sum \tfrac12 m v^2) and the odd piece vs (\sum p_k). 
+
+## 9) Prior art and related formulations
+
+* **Sequential impulses / projected Gauss–Seidel.** Erin Catto’s GDC 2006 talk and subsequent Box2D notes formalize scalar contact rows with warm-start, ERP, and restitution. This is the practical lineage that ADMC-compatible solvers follow. [[box2d.org](https://box2d.org/files/ErinCatto_GDC2006_Tutorial.pdf)]
+* **Warm-started PGS convergence studies.** Empirical analyses (e.g., the warm-starting report on arXiv:1305.3903) quantify the convergence improvements from cached impulses—mirroring the scalar-cached solver in this repo. [[arXiv:1305.3903](https://arxiv.org/abs/1305.3903)]
+* **Complementarity-based time stepping.** Stewart–Trinkle and Anitescu–Potra formulations treat contacts as LCP/DVI problems. They provide a contrast when situating directional scalar rows within broader nonsmooth dynamics literature. [[RPI Foswiki](https://foswiki.cs.rpi.edu/foswiki/bin/view/Cad/TextStewartTrinkleNotes)]
 
 ---
 

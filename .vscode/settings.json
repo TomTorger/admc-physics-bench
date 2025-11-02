@@ -3,5 +3,12 @@
   "cmake.defaultBuildPreset": "msvc-release",
   "cmake.defaultTestPreset": "msvc-release",
   "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
-  "C_Cpp.default.intelliSenseMode": "msvc-x64"
+  "C_Cpp.default.intelliSenseMode": "msvc-x64",
+  "files.associations": {
+    "optional": "cpp",
+    "vector": "cpp",
+    "xstring": "cpp",
+    "ctime": "cpp",
+    "cstdlib": "cpp"
+  }
 }

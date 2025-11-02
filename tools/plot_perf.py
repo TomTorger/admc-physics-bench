@@ -1,4 +1,24 @@
 #!/usr/bin/env python3
+"""
+Plot ADMC bench CSVs into scaling and speedup charts.
+
+Usage:
+    python3 tools/plot_perf.py --inputs results/*.csv --out docs/assets/perf_scaling.svg
+
+Inputs:
+    --inputs: one or more CSV paths produced by `build/bench/bench`.
+    --out:    output SVG path for the scaling plot (a `_speedup` companion is emitted automatically).
+    --scene:  optional filter hint (defaults to `spheres_cloud`). Rows whose `scene` does
+              not include the hint are ignored.
+
+Expected CSV schema:
+    scene, solver, iterations, steps, N_bodies, N_contacts, N_joints, tile_size,
+    ms_per_step, drift_max, Linf_penetration, energy_drift, cone_consistency,
+    simd, threads, commit_sha
+
+The script filters `spheres_cloud_*` rows, groups by solver and body count, and plots the median
+`ms_per_step`. Baseline speedups are derived from the same medians.
+"""
 import argparse
 import csv
 import math
@@ -57,11 +77,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", nargs="+", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--scene", default="spheres_cloud_1024_like")
+    ap.add_argument("--scene", default="spheres_cloud")
     args = ap.parse_args()
 
     rows = read_csv(args.inputs)
-    rows = [row for row in rows if "spheres_cloud" in row.get("scene", "")]
+    scene_hint = args.scene or ""
+    if scene_hint:
+        rows = [row for row in rows if scene_hint in row.get("scene", "")]
 
     data = defaultdict(lambda: defaultdict(list))
     labels = {}

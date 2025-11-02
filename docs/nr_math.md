@@ -92,8 +92,10 @@ Impulse along \(\hat{\mathbf n}\) changes total directional momentum by
 so momentum **along any direction** is conserved in **isolated elastic** rows; bias/restitution prescribe target changes (energy dissipation is expected with \(e<1\), friction).
 
 ## 8) Metrics used in this repo
-- **Directional momentum drift** for a set \(\{\hat{\mathbf d}_\ell\}\):
+- **Directional momentum drift** for \(\{\hat{\mathbf d}_\ell\}\):
   \(\max_\ell \left| \sum_i \mathbf p_i^\text{after}\cdot\hat{\mathbf d}_\ell - \sum_i \mathbf p_i^\text{before}\cdot\hat{\mathbf d}_\ell \right|\).
 - **Constraint violation (penetration)**: \( \|C\|_\infty\).
-- **Energy drift** (diagnostic only in inelastic scenes).
+- **Energy drift** and **friction cone consistency** are tracked for validation.
+
+Full derivations, units, and CSV column mapping are provided in `docs/metrics.md`.
 
