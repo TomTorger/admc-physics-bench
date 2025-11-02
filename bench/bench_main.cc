@@ -16,6 +16,7 @@
 #include "solver_scalar_cached.hpp"
 #include "solver_scalar_soa.hpp"
 #include "solver_scalar_soa_native.hpp"
+#include "solver/solver_scalar_soa_native_par.hpp"
 #include "solver_scalar_soa_vectorized.hpp"
 #include "solver_scalar_soa_mt.hpp"
 #include "solver_scalar_soa_simd.hpp"
@@ -163,6 +164,7 @@ struct CliOptions {
   bool spheres_only = false;
   bool frictionless = false;
   double convergence_threshold = -1.0;
+  bool deterministic = false;
 };
 
 int parse_int_default(const std::string& value, int fallback) {
@@ -468,6 +470,10 @@ CliOptions parse_cli_options(int argc, char** argv, std::vector<char*>& passthro
     } else if (arg == "--frictionless") {
       opts.run_cli = true;
       opts.frictionless = true;
+    } else if (arg == "--deterministic") {
+      opts.run_cli = true;
+      opts.deterministic = true;
+      opts.threads = 1;
     } else if (arg.rfind("--convergence-threshold=", 0) == 0) {
       opts.run_cli = true;
       opts.convergence_threshold =
@@ -570,6 +576,12 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
   const int safe_iterations = std::max(1, iterations);
   const int safe_steps = std::max(1, steps);
   const int safe_threads = std::max(1, threads);
+#if defined(ADMC_DETERMINISTIC)
+  constexpr bool deterministic_mode = true;
+#else
+  const bool deterministic_mode = overrides && overrides->deterministic;
+#endif
+  const int effective_threads = deterministic_mode ? 1 : safe_threads;
 
   std::string normalized = normalize_solver_name(solver_name);
 
@@ -616,8 +628,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     SoaParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
-    params.use_threads = (safe_threads > 1);
-    params.thread_count = safe_threads;
+    params.use_threads = (effective_threads > 1);
+    params.thread_count = effective_threads;
     if (tile_size_override > 0) {
       params.tile_size = tile_size_override;
       params.max_contacts_per_tile = tile_size_override;
@@ -640,8 +652,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     SoaParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
-    params.use_threads = (safe_threads > 1);
-    params.thread_count = safe_threads;
+    params.use_threads = (effective_threads > 1);
+    params.thread_count = effective_threads;
     params.use_simd = true;
     if (tile_size_override > 0) {
       params.tile_size = tile_size_override;
@@ -667,8 +679,8 @@ std::optional<BenchmarkResult> run_solver_case(const std::string& solver_name,
     SoaParams params;
     params.iterations = safe_iterations;
     params.dt = dt;
-    params.use_threads = (safe_threads > 1);
-    params.thread_count = safe_threads;
+    params.use_threads = (effective_threads > 1);
+    params.thread_count = effective_threads;
     if (tile_size_override > 0) {
       params.tile_size = tile_size_override;
       params.max_contacts_per_tile = tile_size_override;
@@ -1708,8 +1720,17 @@ SoaSolveFn select_solver(SoaSolverVariant variant) {
       return [](std::vector<RigidBody>& bodies, std::vector<Contact>& contacts,
                 RowSOA& rows, JointSOA& joints, const SoaParams& params,
                 SolverDebugInfo* debug_info) {
-        solve_scalar_soa_native(bodies, contacts, rows, joints, params,
-                                debug_info);
+        bool used_parallel = false;
+#if defined(ADMC_ENABLE_PARALLEL) && !defined(ADMC_DETERMINISTIC)
+        if (params.use_threads && params.thread_count > 1) {
+          used_parallel = admc::solve_scalar_soa_native_parallel(
+              bodies, contacts, rows, joints, params, debug_info);
+        }
+#endif
+        if (!used_parallel) {
+          solve_scalar_soa_native(bodies, contacts, rows, joints, params,
+                                  debug_info);
+        }
       };
   }
   return nullptr;

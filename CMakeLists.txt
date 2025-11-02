@@ -11,6 +11,8 @@ option(ADMC_ENABLE_AVX2 "Enable AVX2 kernels" ON)
 option(ADMC_ENABLE_AVX512 "Enable AVX-512 kernels" OFF)
 option(ADMC_ENABLE_NEON "Enable NEON kernels" ON)
 option(ADMC_USE_THREADS "Enable multithreaded solver wrapper" ON)
+option(ADMC_ENABLE_PARALLEL "Enable multithreaded solver" ON)
+option(ADMC_DETERMINISTIC "Force deterministic single-thread behavior" OFF)
 
 include(CheckCXXCompilerFlag)
 
@@ -83,7 +85,8 @@ add_library(core
   src/solver_baseline_vec.cc src/solver_scalar_cached.cc src/solver_scalar_soa.cc
   src/solver_scalar_soa.cpp src/solver_scalar_soa_spheres.cpp
   src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
-  src/solver_scalar_soa_native.cc
+  src/solver_scalar_soa_native.cc src/solver/islands.cc
+  src/solver/solver_scalar_soa_native_par.cc
   src/solver_scalar_soa_vectorized.cc src/solver_vec_lane.cpp src/soa/tiler.cpp)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
@@ -107,6 +110,14 @@ endif()
 
 if(ADMC_USE_THREADS)
   target_compile_definitions(core PUBLIC ADMC_USE_THREADS)
+endif()
+
+if(ADMC_ENABLE_PARALLEL)
+  target_compile_definitions(core PUBLIC ADMC_ENABLE_PARALLEL=1)
+endif()
+
+if(ADMC_DETERMINISTIC)
+  target_compile_definitions(core PUBLIC ADMC_DETERMINISTIC=1)
 endif()
 
 add_executable(bench bench/bench_main.cc)

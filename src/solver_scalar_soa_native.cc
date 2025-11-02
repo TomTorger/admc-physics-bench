@@ -1,6 +1,7 @@
 #include "solver_scalar_soa_native.hpp"
 
 #include "platform.hpp"
+#include "solver/thread_scratch.hpp"
 #include "soa_pack.hpp"
 #include "solver_scalar_soa.hpp"
 #include "types.hpp"
@@ -13,6 +14,7 @@
 namespace {
 
 using math::Vec3;
+using admc::ThreadScratch;
 
 using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
@@ -38,20 +40,20 @@ struct ScopedAccumulator {
 };
 
 struct BodySoA {
-  std::vector<double> vx;
-  std::vector<double> vy;
-  std::vector<double> vz;
-  std::vector<double> wx;
-  std::vector<double> wy;
-  std::vector<double> wz;
+  std::span<double> vx;
+  std::span<double> vy;
+  std::span<double> vz;
+  std::span<double> wx;
+  std::span<double> wy;
+  std::span<double> wz;
 
-  explicit BodySoA(std::size_t count)
-      : vx(count, 0.0),
-        vy(count, 0.0),
-        vz(count, 0.0),
-        wx(count, 0.0),
-        wy(count, 0.0),
-        wz(count, 0.0) {}
+  explicit BodySoA(const ThreadScratch::BodyState& state)
+      : vx(state.vx),
+        vy(state.vy),
+        vz(state.vz),
+        wx(state.wx),
+        wy(state.wy),
+        wz(state.wz) {}
 
   void load_from(const std::vector<RigidBody>& bodies,
                  const std::vector<int>& active_indices) {
@@ -404,7 +406,14 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
     body.syncDerived();
   }
 
-  BodySoA body_state(bodies.size());
+  ThreadScratch& scratch = admc::tls_scratch();
+  BodySoA body_state(scratch.acquire_body_state(bodies.size()));
+  std::fill(body_state.vx.begin(), body_state.vx.end(), 0.0);
+  std::fill(body_state.vy.begin(), body_state.vy.end(), 0.0);
+  std::fill(body_state.vz.begin(), body_state.vz.end(), 0.0);
+  std::fill(body_state.wx.begin(), body_state.wx.end(), 0.0);
+  std::fill(body_state.wy.begin(), body_state.wy.end(), 0.0);
+  std::fill(body_state.wz.begin(), body_state.wz.end(), 0.0);
   const std::vector<int> active_bodies =
       collect_active_body_indices(rows, joints, bodies.size());
   {
