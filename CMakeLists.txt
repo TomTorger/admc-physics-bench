@@ -16,6 +16,7 @@ option(ADMC_DETERMINISTIC "Force deterministic single-thread behavior" OFF)
 
 include(CheckCXXCompilerFlag)
 
+# --- SIMD feature detection ---
 set(ADMC_SIMD_FLAGS "")
 set(ADMC_COMPILE_AVX2 OFF)
 set(ADMC_COMPILE_AVX512 OFF)
@@ -44,9 +45,6 @@ else()
     check_cxx_compiler_flag("-mavx2" ADMC_COMPILER_HAS_AVX2)
     check_cxx_compiler_flag("-mfma" ADMC_COMPILER_HAS_FMA)
     if(ADMC_COMPILER_HAS_AVX2)
-      if(NOT ADMC_COMPILER_HAS_FMA)
-        set(ADMC_COMPILER_HAS_FMA ON)
-      endif()
       list(APPEND ADMC_SIMD_FLAGS "-mavx2" "-mfma")
       set(ADMC_COMPILE_AVX2 ON)
     endif()
@@ -72,6 +70,7 @@ else()
   endif()
 endif()
 
+# --- Optional Google Benchmark ---
 if(ENABLE_BENCHMARKS)
   FetchContent_Declare(benchmark
     GIT_REPOSITORY https://github.com/google/benchmark.git
@@ -79,6 +78,7 @@ if(ENABLE_BENCHMARKS)
   FetchContent_MakeAvailable(benchmark)
 endif()
 
+# --- Core library ---
 add_library(core
   src/math.hpp src/types.hpp
   src/contact_gen.cc src/scenes.cc src/metrics.cc src/metrics_micro.cc src/joints.cc
@@ -87,7 +87,8 @@ add_library(core
   src/solver_scalar_soa_simd.cc src/solver_scalar_soa_mt.cc
   src/solver_scalar_soa_native.cc src/solver/islands.cc
   src/solver/solver_scalar_soa_native_par.cc
-  src/solver_scalar_soa_vectorized.cc src/solver_vec_lane.cpp src/soa/tiler.cpp)
+  src/solver_scalar_soa_vectorized.cc src/solver_vec_lane.cpp src/soa/tiler.cpp
+)
 target_include_directories(core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(core PRIVATE $<$<CONFIG:Release>:NDEBUG>)
 
@@ -99,35 +100,42 @@ endif()
 if(ADMC_COMPILE_AVX2)
   target_compile_definitions(core PUBLIC ADMC_ENABLE_AVX2)
 endif()
-
 if(ADMC_COMPILE_AVX512)
   target_compile_definitions(core PUBLIC ADMC_ENABLE_AVX512)
 endif()
-
 if(ADMC_COMPILE_NEON)
   target_compile_definitions(core PUBLIC ADMC_ENABLE_NEON)
 endif()
-
 if(ADMC_USE_THREADS)
   target_compile_definitions(core PUBLIC ADMC_USE_THREADS)
 endif()
-
 if(ADMC_ENABLE_PARALLEL)
   target_compile_definitions(core PUBLIC ADMC_ENABLE_PARALLEL=1)
 endif()
-
 if(ADMC_DETERMINISTIC)
   target_compile_definitions(core PUBLIC ADMC_DETERMINISTIC=1)
 endif()
 
-add_executable(bench bench/bench_main.cc)
-target_link_libraries(bench PRIVATE core)
+# --- Modular Bench suite (new) ---
+set(BENCH_SOURCES
+  bench/bench_main.cc
+  bench/bench_cli.hpp
+  bench/bench_runner.hpp
+  bench/bench_output.hpp
+  bench/bench_scenes.hpp
+  bench/bench_utils.hpp
+  bench/bench_csv_schema.hpp
+  bench/bench_parallel.hpp
+)
+add_library(bench_common INTERFACE)
+target_include_directories(bench_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/bench)
+
+add_executable(bench ${BENCH_SOURCES})
+target_link_libraries(bench PRIVATE core bench_common)
 set_target_properties(bench PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bench)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/bench)
 
-# Provide a compatibility copy of the bench binary under the historical
-# name `bench_main` so existing scripts (including the CI chart updater)
-# can continue to invoke the executable without modification.
+# --- Legacy alias (for CI compatibility) ---
 set(ADMC_BENCH_LEGACY_PATH
     "${CMAKE_BINARY_DIR}/bench/bench_main${CMAKE_EXECUTABLE_SUFFIX}")
 add_custom_command(
@@ -138,6 +146,8 @@ add_custom_command(
   BYPRODUCTS ${ADMC_BENCH_LEGACY_PATH}
   COMMENT "Copying bench binary to legacy name bench_main"
 )
+
+# --- Benchmark integration ---
 if(ENABLE_BENCHMARKS)
   target_link_libraries(bench PRIVATE benchmark::benchmark)
   target_compile_definitions(bench PRIVATE ADMC_HAVE_GBENCH=1)
@@ -145,6 +155,7 @@ else()
   target_compile_definitions(bench PRIVATE ADMC_HAVE_GBENCH=0)
 endif()
 
+# --- Tests ---
 if(BUILD_TESTING)
   enable_testing()
   add_executable(test_invariants tests/test_invariants.cc)
@@ -168,11 +179,12 @@ if(BUILD_TESTING)
   add_executable(test_parity_soa_vs_baseline tests/parity_soa_vs_baseline.cc)
   target_link_libraries(test_parity_soa_vs_baseline PRIVATE core)
 
-  add_custom_target(tests DEPENDS test_invariants test_sanity test_solvers test_joints
-                                   test_simd_parity test_thread_determinism
-                                   test_quick_parity test_csv_header_only
-                                   test_energy_and_penetration
-                                   test_parity_soa_vs_baseline)
+  add_custom_target(tests DEPENDS
+    test_invariants test_sanity test_solvers test_joints
+    test_simd_parity test_thread_determinism test_quick_parity
+    test_csv_header_only test_energy_and_penetration
+    test_parity_soa_vs_baseline
+  )
 
   add_test(NAME test_invariants COMMAND test_invariants)
   add_test(NAME test_sanity COMMAND test_sanity)
