@@ -107,7 +107,7 @@ types.hpp            # RigidBody, Contact, RowSOA (and friends)
 
 ### Prereqs
 - **CMake ≥ 3.20**
-- A C++17 compiler (Clang, GCC, MSVC)
+- A C++20 compiler (Clang, GCC, MSVC)
 - (Linux/macOS) _optional:_ Ninja for faster builds
 
 ### Configure & build (Release)
@@ -115,6 +115,19 @@ types.hpp            # RigidBody, Contact, RowSOA (and friends)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ````
+
+### Windows (MSVC) quick start
+
+Prerequisites: **MSVC Build Tools**, **CMake ≥ 3.20**, and optionally **Ninja**.
+
+```powershell
+cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release -j
+ctest --test-dir build --output-on-failure
+```
+
+> Tip: pass `-DADMC_BUILD_BENCH=ON` during configuration to build the benchmark
+> harness before running the commands below.
 
 ### Run tests
 

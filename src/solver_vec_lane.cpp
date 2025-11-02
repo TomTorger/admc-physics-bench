@@ -1,6 +1,8 @@
 #include "solver_vec_lane.hpp"
 
-#if defined(ADMC_ENABLE_AVX2) && !defined(__ARM_NEON)
+#include "platform.hpp"
+
+#if ADMC_HAS_AVX2 && !ADMC_HAS_NEON
 #include <immintrin.h>
 
 namespace admc {
@@ -82,7 +84,7 @@ void solve_normal_lane_avx2(TileSpan) {}
 }  // namespace admc
 #endif
 
-#if defined(ADMC_ENABLE_NEON) && defined(__ARM_NEON)
+#if ADMC_HAS_NEON
 #include <arm_neon.h>
 
 namespace admc {

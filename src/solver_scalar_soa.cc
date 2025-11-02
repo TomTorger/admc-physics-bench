@@ -13,8 +13,7 @@ using Clock = std::chrono::steady_clock;
 using DurationMs = std::chrono::duration<double, std::milli>;
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
-constexpr double kWarmstartRotationCosThreshold =
-    std::cos(15.0 * kPi / 180.0);
+constexpr double kWarmstartRotationCosThreshold = 0.96592582628906828675;
 
 #if defined(_MSC_VER)
 #define ADMC_RESTRICT __restrict
@@ -1506,7 +1505,7 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   }
 #endif
 
-#if defined(ADMC_ENABLE_AVX2) || defined(ADMC_ENABLE_NEON)
+#if ADMC_HAS_AVX2 || ADMC_HAS_NEON
   if (effective.use_simd) {
     solve_scalar_soa_simd(bodies, contacts, rows, joints, effective, debug_info);
     return;
@@ -1546,7 +1545,7 @@ void solve_scalar_soa(std::vector<RigidBody>& bodies,
   }
 #endif
 
-#if defined(ADMC_ENABLE_AVX2) || defined(ADMC_ENABLE_NEON)
+#if ADMC_HAS_AVX2 || ADMC_HAS_NEON
   if (effective.use_simd) {
     solve_scalar_soa_simd(bodies, contacts, rows, effective, debug_info);
     return;

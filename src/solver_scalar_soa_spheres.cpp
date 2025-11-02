@@ -11,17 +11,8 @@
 
 namespace {
 
-#if defined(ADMC_ENABLE_AVX2) && !defined(__ARM_NEON)
-constexpr bool kHasAvx2 = true;
-#else
-constexpr bool kHasAvx2 = false;
-#endif
-
-#if defined(ADMC_ENABLE_NEON) && defined(__ARM_NEON)
-constexpr bool kHasNeon = true;
-#else
-constexpr bool kHasNeon = false;
-#endif
+constexpr bool kHasAvx2 = ADMC_HAS_AVX2 != 0;
+constexpr bool kHasNeon = ADMC_HAS_NEON != 0;
 
 inline void apply_impulse_to_body(int index,
                                   float impulse_x,

@@ -243,7 +243,7 @@ struct Quat {
 //! Rotation matrix from quaternion (active rotation).
 inline Mat3 from_quat(const Quat& q_in) {
   const Quat q = q_in.normalized();
-  const double ww = q.w * q.w;
+  [[maybe_unused]] const double ww = q.w * q.w;
   const double xx = q.x * q.x;
   const double yy = q.y * q.y;
   const double zz = q.z * q.z;
