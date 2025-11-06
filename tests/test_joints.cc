@@ -59,7 +59,7 @@ void test_pendulum_length_preservation() {
     run_cached_step(scene, params);
   }
   build_distance_joint_rows(scene.bodies, scene.joints, params.dt);
-  const double joint_err = joint_error_Linf(scene.joints);
+  [[maybe_unused]] const double joint_err = joint_error_Linf(scene.joints);
   assert(joint_err < 1e-5);
 
   Scene momentum_scene = make_pendulum(1);
@@ -101,8 +101,8 @@ void test_chain_stability() {
   assert(joint_error_Linf(soa_scene.joints) < 5e-3);
 
   for (std::size_t i = 0; i < cached_scene.bodies.size(); ++i) {
-    const RigidBody& a = cached_scene.bodies[i];
-    const RigidBody& b = soa_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& a = cached_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& b = soa_scene.bodies[i];
     assert(std::isfinite(a.v.x) && std::isfinite(a.v.y) && std::isfinite(a.v.z));
     assert(std::isfinite(b.v.x) && std::isfinite(b.v.y) && std::isfinite(b.v.z));
     assert(std::fabs(a.v.x - b.v.x) < 1e-6);
@@ -155,7 +155,7 @@ void test_rope_tension_clamp() {
   const RigidBody& B = scene.bodies[solved.b];
   const math::Vec3 va = A.v + math::cross(A.w, solved.ra);
   const math::Vec3 vb = B.v + math::cross(B.w, solved.rb);
-  const double v_rel_d = math::dot(solved.d_hat, vb - va);
+  [[maybe_unused]] const double v_rel_d = math::dot(solved.d_hat, vb - va);
   assert(v_rel_d >= -1e-9);
 }
 
@@ -178,8 +178,8 @@ void test_joint_determinism() {
     run_cached_step(scene_b, params);
   }
 
-  const std::uint64_t hash_a = hash_state(scene_a.bodies);
-  const std::uint64_t hash_b = hash_state(scene_b.bodies);
+  [[maybe_unused]] const std::uint64_t hash_a = hash_state(scene_a.bodies);
+  [[maybe_unused]] const std::uint64_t hash_b = hash_state(scene_b.bodies);
   assert(hash_a == hash_b);
 }
 

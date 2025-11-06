@@ -65,10 +65,10 @@ void test_frictionless_parity() {
   assert(native_drift.max_abs < 1e-10);
 
   for (std::size_t i = 0; i < baseline_scene.bodies.size(); ++i) {
-    const RigidBody& b0 = baseline_scene.bodies[i];
-    const RigidBody& b1 = cached_scene.bodies[i];
-    const RigidBody& b2 = soa_scene.bodies[i];
-    const RigidBody& b3 = native_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& b0 = baseline_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& b1 = cached_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& b2 = soa_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& b3 = native_scene.bodies[i];
     assert(std::fabs(b0.v.x - b1.v.x) < 1e-6);
     assert(std::fabs(b0.v.y - b1.v.y) < 1e-6);
     assert(std::fabs(b0.v.z - b1.v.z) < 1e-6);
@@ -80,7 +80,7 @@ void test_frictionless_parity() {
     assert(std::fabs(b0.v.z - b3.v.z) < 1e-6);
   }
 
-  const double speed = pre[0].v.x;
+  [[maybe_unused]] const double speed = pre[0].v.x;
   assert(std::fabs(baseline_scene.bodies[0].v.x + speed) < 1e-6);
   assert(std::fabs(baseline_scene.bodies[1].v.x - speed) < 1e-6);
 }
@@ -140,9 +140,9 @@ void check_friction_case(double lateral_velocity, bool expect_stick) {
   const math::Vec3 v_rel = vb - va;
   const double vt1 = math::dot(c.t1, v_rel);
   const double vt2 = math::dot(c.t2, v_rel);
-  const double vt_mag = std::sqrt(vt1 * vt1 + vt2 * vt2);
-  const double jt_mag = std::sqrt(c.jt1 * c.jt1 + c.jt2 * c.jt2);
-  const double limit = c.mu * std::max(c.jn, 0.0);
+  [[maybe_unused]] const double vt_mag = std::sqrt(vt1 * vt1 + vt2 * vt2);
+  [[maybe_unused]] const double jt_mag = std::sqrt(c.jt1 * c.jt1 + c.jt2 * c.jt2);
+  [[maybe_unused]] const double limit = c.mu * std::max(c.jn, 0.0);
 
   if (expect_stick) {
     assert(vt_mag < 1e-5);
@@ -199,8 +199,8 @@ void test_determinism() {
     solve_scalar_cached(scene_b.bodies, scene_b.contacts, params);
   }
 
-  const std::uint64_t hash_a = hash_state(scene_a.bodies);
-  const std::uint64_t hash_b = hash_state(scene_b.bodies);
+  [[maybe_unused]] const std::uint64_t hash_a = hash_state(scene_a.bodies);
+  [[maybe_unused]] const std::uint64_t hash_b = hash_state(scene_b.bodies);
   assert(hash_a == hash_b);
 }
 

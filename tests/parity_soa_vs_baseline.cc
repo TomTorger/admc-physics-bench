@@ -49,9 +49,9 @@ void run_two_sphere_parity() {
   soa::solve_soa(world, manifold, solver_params);
 
   for (std::size_t i = 0; i < baseline_scene.bodies.size(); ++i) {
-    const RigidBody& ref = baseline_scene.bodies[i];
-    const RigidBody& cached = cached_scene.bodies[i];
-    const RigidBody& soa_body = soa_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& ref = baseline_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& cached = cached_scene.bodies[i];
+    [[maybe_unused]] const RigidBody& soa_body = soa_scene.bodies[i];
     assert(std::fabs(ref.v.x - cached.v.x) < 1e-6);
     assert(std::fabs(ref.v.y - cached.v.y) < 1e-6);
     assert(std::fabs(ref.v.z - cached.v.z) < 1e-6);
@@ -95,19 +95,19 @@ void run_cloud_metrics() {
   soa::ContactManifold manifold(soa_scene.contacts);
   soa::solve_soa(world, manifold, solver_params);
 
-  const double baseline_drift =
+  [[maybe_unused]] const double baseline_drift =
       directional_momentum_drift(initial_bodies, baseline_scene.bodies).max_abs;
-  const double soa_drift =
+  [[maybe_unused]] const double soa_drift =
       directional_momentum_drift(initial_bodies, soa_scene.bodies).max_abs;
   assert(std::fabs(baseline_drift - soa_drift) < 1e-6);
 
-  const double baseline_penetration =
+  [[maybe_unused]] const double baseline_penetration =
       constraint_penetration_Linf(baseline_scene.contacts);
-  const double soa_penetration = constraint_penetration_Linf(soa_scene.contacts);
+  [[maybe_unused]] const double soa_penetration = constraint_penetration_Linf(soa_scene.contacts);
   assert(std::fabs(baseline_penetration - soa_penetration) < 1e-6);
 
-  const double baseline_energy = energy_drift(initial_bodies, baseline_scene.bodies);
-  const double soa_energy = energy_drift(initial_bodies, soa_scene.bodies);
+  [[maybe_unused]] const double baseline_energy = energy_drift(initial_bodies, baseline_scene.bodies);
+  [[maybe_unused]] const double soa_energy = energy_drift(initial_bodies, soa_scene.bodies);
   assert(std::fabs(baseline_energy - soa_energy) < 1e-6);
 }
 

@@ -111,14 +111,6 @@ struct BatchColoring;
 BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
                                     int body_count);
 
-double solve_normal_batch(ContactBatch& batch,
-                          BodySoA& body_state,
-                          SolverDebugInfo* debug_info);
-
-double solve_friction_batch(ContactBatch& batch,
-                            BodySoA& body_state,
-                            SolverDebugInfo* debug_info);
-
 inline double clamp_tangent(double jt1,
                             double jt2,
                             double limit,
@@ -371,6 +363,37 @@ struct BatchColoring {
   std::vector<int> batch_color;
   std::vector<std::vector<int>> batches_per_color;
   std::vector<char> color_has_friction;
+  std::vector<std::vector<int>> color_body_indices;
+};
+
+struct alignas(64) BodyDelta {
+  double dvx = 0.0;
+  double dvy = 0.0;
+  double dvz = 0.0;
+  double dwx = 0.0;
+  double dwy = 0.0;
+  double dwz = 0.0;
+};
+
+struct WorkerAccum {
+  std::vector<BodyDelta> deltas;
+  std::vector<int> touched;
+  std::vector<char> marked;
+
+  void ensure(std::size_t count) {
+    if (deltas.size() < count) {
+      deltas.resize(count);
+    }
+    if (marked.size() < count) {
+      marked.resize(count);
+    }
+  }
+
+  void reset() {
+    std::fill(deltas.begin(), deltas.end(), BodyDelta{});
+    std::fill(marked.begin(), marked.end(), static_cast<char>(0));
+    touched.clear();
+  }
 };
 
 BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
@@ -452,8 +475,9 @@ BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
     return result;
   }
 
-  result.batches_per_color.resize(static_cast<std::size_t>(max_color) + 1);
-  result.color_has_friction.resize(static_cast<std::size_t>(max_color) + 1, 0);
+  const std::size_t color_count = static_cast<std::size_t>(max_color) + 1;
+  result.batches_per_color.resize(color_count);
+  result.color_has_friction.resize(color_count, 0);
   for (std::size_t i = 0; i < batch_count; ++i) {
     const int color = result.batch_color[i];
     if (color < 0) {
@@ -465,12 +489,51 @@ BatchColoring color_contact_batches(const std::vector<ContactBatch>& batches,
     }
   }
 
+  result.color_body_indices.resize(color_count);
+  std::vector<int> body_stamp(static_cast<std::size_t>(body_count), -1);
+  int color_stamp_value = 0;
+  for (std::size_t color = 0; color < color_count; ++color) {
+    auto& bodies = result.color_body_indices[color];
+    bodies.clear();
+    ++color_stamp_value;
+    for (int batch_idx : result.batches_per_color[color]) {
+      if (batch_idx < 0 || static_cast<std::size_t>(batch_idx) >= batch_count) {
+        continue;
+      }
+      const ContactBatch& batch = batches[static_cast<std::size_t>(batch_idx)];
+      for (int lane = 0; lane < batch.lanes; ++lane) {
+        if (!batch.lane_valid[lane]) {
+          continue;
+        }
+        const int ia = batch.bodyA_index[lane];
+        const int ib = batch.bodyB_index[lane];
+        if (ia >= 0 && ia < body_count) {
+          const std::size_t idx = static_cast<std::size_t>(ia);
+          if (body_stamp[idx] != color_stamp_value) {
+            body_stamp[idx] = color_stamp_value;
+            bodies.push_back(ia);
+          }
+        }
+        if (ib >= 0 && ib < body_count) {
+          const std::size_t idx = static_cast<std::size_t>(ib);
+          if (body_stamp[idx] != color_stamp_value) {
+            body_stamp[idx] = color_stamp_value;
+            bodies.push_back(ib);
+          }
+        }
+      }
+    }
+  }
+
   return result;
 }
 
+template <typename ApplyFn>
 double solve_normal_batch(ContactBatch& batch,
                           BodySoA& body_state,
+                          ApplyFn&& apply_delta,
                           SolverDebugInfo* debug_info) {
+  (void)body_state;
   VecD dvx_v = VecD::load(batch.dvx);
   VecD dvy_v = VecD::load(batch.dvy);
   VecD dvz_v = VecD::load(batch.dvz);
@@ -556,19 +619,20 @@ double solve_normal_batch(ContactBatch& batch,
       const double delta_wby = applied * batch.TWn_b_y[lane];
       const double delta_wbz = applied * batch.TWn_b_z[lane];
 
-      body_state.vx[ia] += delta_vax;
-      body_state.vy[ia] += delta_vay;
-      body_state.vz[ia] += delta_vaz;
-      body_state.vx[ib] += delta_vbx;
-      body_state.vy[ib] += delta_vby;
-      body_state.vz[ib] += delta_vbz;
-
-      body_state.wx[ia] += delta_wax;
-      body_state.wy[ia] += delta_way;
-      body_state.wz[ia] += delta_waz;
-      body_state.wx[ib] += delta_wbx;
-      body_state.wy[ib] += delta_wby;
-      body_state.wz[ib] += delta_wbz;
+      apply_delta(ia,
+                  delta_vax,
+                  delta_vay,
+                  delta_vaz,
+                  delta_wax,
+                  delta_way,
+                  delta_waz);
+      apply_delta(ib,
+                  delta_vbx,
+                  delta_vby,
+                  delta_vbz,
+                  delta_wbx,
+                  delta_wby,
+                  delta_wbz);
 
       apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
                        delta_way, delta_waz);
@@ -580,9 +644,12 @@ double solve_normal_batch(ContactBatch& batch,
   return max_delta;
 }
 
+template <typename ApplyFn>
 double solve_friction_batch(ContactBatch& batch,
                             BodySoA& body_state,
+                            ApplyFn&& apply_delta,
                             SolverDebugInfo* debug_info) {
+  (void)body_state;
   if (!batch.has_friction) {
     return 0.0;
   }
@@ -709,19 +776,20 @@ double solve_friction_batch(ContactBatch& batch,
       const double delta_wbz =
           dj1 * batch.TWt1_b_z[lane] + dj2 * batch.TWt2_b_z[lane];
 
-      body_state.vx[ia] += delta_vax;
-      body_state.vy[ia] += delta_vay;
-      body_state.vz[ia] += delta_vaz;
-      body_state.vx[ib] += delta_vbx;
-      body_state.vy[ib] += delta_vby;
-      body_state.vz[ib] += delta_vbz;
-
-      body_state.wx[ia] += delta_wax;
-      body_state.wy[ia] += delta_way;
-      body_state.wz[ia] += delta_waz;
-      body_state.wx[ib] += delta_wbx;
-      body_state.wy[ib] += delta_wby;
-      body_state.wz[ib] += delta_wbz;
+      apply_delta(ia,
+                  delta_vax,
+                  delta_vay,
+                  delta_vaz,
+                  delta_wax,
+                  delta_way,
+                  delta_waz);
+      apply_delta(ib,
+                  delta_vbx,
+                  delta_vby,
+                  delta_vbz,
+                  delta_wbx,
+                  delta_wby,
+                  delta_wbz);
 
       apply_body_delta(batch, ia, delta_vax, delta_vay, delta_vaz, delta_wax,
                        delta_way, delta_waz);
@@ -805,6 +873,7 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
                              JointSOA& joints,
                              const SoaParams& params,
                              SolverDebugInfo* debug_info) {
+  (void)contacts;
   const auto solver_begin = Clock::now();
   const int iterations = std::max(1, params.iterations);
   SoaNativeStats stats;
@@ -1033,7 +1102,8 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
   BatchColoring color_data;
   admc::TaskPool* pool = nullptr;
   unsigned worker_count = 1;
-  std::vector<SolverDebugInfo> worker_debug;
+  std::vector<int> body_slots;
+  std::vector<WorkerAccum> worker_accum;
   if (allow_parallel) {
     color_data =
         color_contact_batches(contact_batches,
@@ -1041,9 +1111,8 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
     if (!color_data.batches_per_color.empty()) {
       pool = &native_solver_pool(static_cast<unsigned>(params.thread_count));
       worker_count = std::max(1u, pool->worker_count());
-      if (debug_info) {
-        worker_debug.resize(worker_count);
-      }
+      body_slots.assign(body_state.vx.size(), -1);
+      worker_accum.resize(worker_count);
     }
   }
 
@@ -1057,10 +1126,31 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
 
     if (!parallel_ready) {
       ScopedAccumulator normal_timer(&stats.normal_ms);
+      auto apply_serial = [&](int body,
+                              double dvx,
+                              double dvy,
+                              double dvz,
+                              double dwx,
+                              double dwy,
+                              double dwz) {
+        if (body < 0) {
+          return;
+        }
+        const std::size_t idx = static_cast<std::size_t>(body);
+        if (idx >= body_state.vx.size()) {
+          return;
+        }
+        body_state.vx[idx] += dvx;
+        body_state.vy[idx] += dvy;
+        body_state.vz[idx] += dvz;
+        body_state.wx[idx] += dwx;
+        body_state.wy[idx] += dwy;
+        body_state.wz[idx] += dwz;
+      };
       for (ContactBatch& batch : contact_batches) {
         normal_max_delta = std::max(
             normal_max_delta,
-            solve_normal_batch(batch, body_state, debug_info));
+            solve_normal_batch(batch, body_state, apply_serial, debug_info));
       }
     } else {
       ScopedAccumulator normal_timer(&stats.normal_ms);
@@ -1070,52 +1160,175 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
         if (bucket.empty()) {
           continue;
         }
-        std::atomic<std::size_t> cursor{0};
-        std::vector<double> local_max(worker_count, 0.0);
-        if (debug_info) {
-          for (auto& dbg : worker_debug) {
-            dbg.reset();
+        const auto& color_bodies = color_data.color_body_indices[color];
+        for (std::size_t i = 0; i < color_bodies.size(); ++i) {
+          const int body = color_bodies[i];
+          if (body < 0) {
+            continue;
+          }
+          const std::size_t idx = static_cast<std::size_t>(body);
+          if (idx < body_slots.size()) {
+            body_slots[idx] = static_cast<int>(i);
           }
         }
-        for (unsigned w = 0; w < worker_count; ++w) {
-          pool->enqueue([&, w]() {
+
+        const std::size_t total = bucket.size();
+        const std::size_t task_count = std::min<std::size_t>(
+            worker_count, std::max<std::size_t>(1, total));
+        const std::size_t chunk_size = std::max<std::size_t>(
+            1, (total + task_count - 1) / task_count);
+        std::atomic<std::size_t> cursor{0};
+        std::vector<double> task_max(task_count, 0.0);
+        std::vector<SolverDebugInfo> task_debug;
+        if (debug_info) {
+          task_debug.resize(task_count);
+        }
+        for (std::size_t task = 0; task < task_count; ++task) {
+          WorkerAccum& accum = worker_accum[task];
+          accum.ensure(color_bodies.size());
+          accum.reset();
+        }
+
+        for (std::size_t task = 0; task < task_count; ++task) {
+          pool->enqueue([&, task]() {
             double max_delta = 0.0;
-            SolverDebugInfo* dbg =
-                debug_info ? &worker_debug[w] : nullptr;
+            WorkerAccum& accum = worker_accum[task];
+            SolverDebugInfo* dbg = nullptr;
+            if (debug_info) {
+              task_debug[task].reset();
+              dbg = &task_debug[task];
+            }
             while (true) {
-              const std::size_t idx =
-                  cursor.fetch_add(1, std::memory_order_relaxed);
-              if (idx >= bucket.size()) {
+              const std::size_t begin =
+                  cursor.fetch_add(chunk_size, std::memory_order_relaxed);
+              if (begin >= total) {
                 break;
               }
-              ContactBatch& batch =
-                  contact_batches[static_cast<std::size_t>(bucket[idx])];
-              max_delta = std::max(
-                  max_delta, solve_normal_batch(batch, body_state, dbg));
+              const std::size_t end = std::min(total, begin + chunk_size);
+              for (std::size_t idx = begin; idx < end; ++idx) {
+                ContactBatch& batch = contact_batches[static_cast<std::size_t>(
+                    bucket[idx])];
+                auto apply_parallel = [&](int body,
+                                          double dvx,
+                                          double dvy,
+                                          double dvz,
+                                          double dwx,
+                                          double dwy,
+                                          double dwz) {
+                  if (body < 0) {
+                    return;
+                  }
+                  const std::size_t body_idx = static_cast<std::size_t>(body);
+                  if (body_idx >= body_slots.size()) {
+                    return;
+                  }
+                  const int slot = body_slots[body_idx];
+                  if (slot < 0 ||
+                      static_cast<std::size_t>(slot) >= color_bodies.size()) {
+                    return;
+                  }
+                  BodyDelta& delta =
+                      accum.deltas[static_cast<std::size_t>(slot)];
+                  delta.dvx += dvx;
+                  delta.dvy += dvy;
+                  delta.dvz += dvz;
+                  delta.dwx += dwx;
+                  delta.dwy += dwy;
+                  delta.dwz += dwz;
+                  if (!accum.marked[static_cast<std::size_t>(slot)]) {
+                    accum.marked[static_cast<std::size_t>(slot)] = 1;
+                    accum.touched.push_back(slot);
+                  }
+                };
+                max_delta = std::max(
+                    max_delta,
+                    solve_normal_batch(batch, body_state, apply_parallel, dbg));
+              }
             }
-            local_max[w] = max_delta;
+            task_max[task] = max_delta;
           });
         }
+
         pool->wait_idle();
+
         if (debug_info) {
-          for (const auto& dbg : worker_debug) {
+          for (const auto& dbg : task_debug) {
             debug_info->accumulate(dbg);
           }
         }
+
         double color_max = 0.0;
-        for (double value : local_max) {
+        for (double value : task_max) {
           color_max = std::max(color_max, value);
         }
+
+        for (std::size_t task = 0; task < task_count; ++task) {
+          WorkerAccum& accum = worker_accum[task];
+          for (int slot : accum.touched) {
+            if (slot < 0 ||
+                static_cast<std::size_t>(slot) >= color_bodies.size()) {
+              continue;
+            }
+            const int body = color_bodies[static_cast<std::size_t>(slot)];
+            if (body < 0) {
+              continue;
+            }
+            const std::size_t idx = static_cast<std::size_t>(body);
+            if (idx >= body_state.vx.size()) {
+              continue;
+            }
+            const BodyDelta& delta =
+                accum.deltas[static_cast<std::size_t>(slot)];
+            body_state.vx[idx] += delta.dvx;
+            body_state.vy[idx] += delta.dvy;
+            body_state.vz[idx] += delta.dvz;
+            body_state.wx[idx] += delta.dwx;
+            body_state.wy[idx] += delta.dwy;
+            body_state.wz[idx] += delta.dwz;
+          }
+        }
+
+        for (int body : color_bodies) {
+          if (body < 0) {
+            continue;
+          }
+          const std::size_t idx = static_cast<std::size_t>(body);
+          if (idx < body_slots.size()) {
+            body_slots[idx] = -1;
+          }
+        }
+
         normal_max_delta = std::max(normal_max_delta, color_max);
       }
     }
 
     if (!parallel_ready) {
       ScopedAccumulator friction_timer(&stats.friction_ms);
+      auto apply_serial = [&](int body,
+                              double dvx,
+                              double dvy,
+                              double dvz,
+                              double dwx,
+                              double dwy,
+                              double dwz) {
+        if (body < 0) {
+          return;
+        }
+        const std::size_t idx = static_cast<std::size_t>(body);
+        if (idx >= body_state.vx.size()) {
+          return;
+        }
+        body_state.vx[idx] += dvx;
+        body_state.vy[idx] += dvy;
+        body_state.vz[idx] += dvz;
+        body_state.wx[idx] += dwx;
+        body_state.wy[idx] += dwy;
+        body_state.wz[idx] += dwz;
+      };
       for (ContactBatch& batch : contact_batches) {
         friction_max_delta = std::max(
             friction_max_delta,
-            solve_friction_batch(batch, body_state, debug_info));
+            solve_friction_batch(batch, body_state, apply_serial, debug_info));
       }
     } else {
       ScopedAccumulator friction_timer(&stats.friction_ms);
@@ -1129,42 +1342,145 @@ void solve_scalar_soa_native(std::vector<RigidBody>& bodies,
         if (bucket.empty()) {
           continue;
         }
-        std::atomic<std::size_t> cursor{0};
-        std::vector<double> local_max(worker_count, 0.0);
-        if (debug_info) {
-          for (auto& dbg : worker_debug) {
-            dbg.reset();
+        const auto& color_bodies = color_data.color_body_indices[color];
+        for (std::size_t i = 0; i < color_bodies.size(); ++i) {
+          const int body = color_bodies[i];
+          if (body < 0) {
+            continue;
+          }
+          const std::size_t idx = static_cast<std::size_t>(body);
+          if (idx < body_slots.size()) {
+            body_slots[idx] = static_cast<int>(i);
           }
         }
-        for (unsigned w = 0; w < worker_count; ++w) {
-          pool->enqueue([&, w]() {
+
+        const std::size_t total = bucket.size();
+        const std::size_t task_count = std::min<std::size_t>(
+            worker_count, std::max<std::size_t>(1, total));
+        const std::size_t chunk_size = std::max<std::size_t>(
+            1, (total + task_count - 1) / task_count);
+        std::atomic<std::size_t> cursor{0};
+        std::vector<double> task_max(task_count, 0.0);
+        std::vector<SolverDebugInfo> task_debug;
+        if (debug_info) {
+          task_debug.resize(task_count);
+        }
+        for (std::size_t task = 0; task < task_count; ++task) {
+          WorkerAccum& accum = worker_accum[task];
+          accum.ensure(color_bodies.size());
+          accum.reset();
+        }
+
+        for (std::size_t task = 0; task < task_count; ++task) {
+          pool->enqueue([&, task]() {
             double max_delta = 0.0;
-            SolverDebugInfo* dbg =
-                debug_info ? &worker_debug[w] : nullptr;
+            WorkerAccum& accum = worker_accum[task];
+            SolverDebugInfo* dbg = nullptr;
+            if (debug_info) {
+              task_debug[task].reset();
+              dbg = &task_debug[task];
+            }
             while (true) {
-              const std::size_t idx =
-                  cursor.fetch_add(1, std::memory_order_relaxed);
-              if (idx >= bucket.size()) {
+              const std::size_t begin =
+                  cursor.fetch_add(chunk_size, std::memory_order_relaxed);
+              if (begin >= total) {
                 break;
               }
-              ContactBatch& batch =
-                  contact_batches[static_cast<std::size_t>(bucket[idx])];
-              max_delta = std::max(
-                  max_delta, solve_friction_batch(batch, body_state, dbg));
+              const std::size_t end = std::min(total, begin + chunk_size);
+              for (std::size_t idx = begin; idx < end; ++idx) {
+                ContactBatch& batch = contact_batches[static_cast<std::size_t>(
+                    bucket[idx])];
+                auto apply_parallel = [&](int body,
+                                          double dvx,
+                                          double dvy,
+                                          double dvz,
+                                          double dwx,
+                                          double dwy,
+                                          double dwz) {
+                  if (body < 0) {
+                    return;
+                  }
+                  const std::size_t body_idx = static_cast<std::size_t>(body);
+                  if (body_idx >= body_slots.size()) {
+                    return;
+                  }
+                  const int slot = body_slots[body_idx];
+                  if (slot < 0 ||
+                      static_cast<std::size_t>(slot) >= color_bodies.size()) {
+                    return;
+                  }
+                  BodyDelta& delta =
+                      accum.deltas[static_cast<std::size_t>(slot)];
+                  delta.dvx += dvx;
+                  delta.dvy += dvy;
+                  delta.dvz += dvz;
+                  delta.dwx += dwx;
+                  delta.dwy += dwy;
+                  delta.dwz += dwz;
+                  if (!accum.marked[static_cast<std::size_t>(slot)]) {
+                    accum.marked[static_cast<std::size_t>(slot)] = 1;
+                    accum.touched.push_back(slot);
+                  }
+                };
+                max_delta = std::max(
+                    max_delta,
+                    solve_friction_batch(
+                        batch, body_state, apply_parallel, dbg));
+              }
             }
-            local_max[w] = max_delta;
+            task_max[task] = max_delta;
           });
         }
+
         pool->wait_idle();
+
         if (debug_info) {
-          for (const auto& dbg : worker_debug) {
+          for (const auto& dbg : task_debug) {
             debug_info->accumulate(dbg);
           }
         }
+
         double color_max = 0.0;
-        for (double value : local_max) {
+        for (double value : task_max) {
           color_max = std::max(color_max, value);
         }
+
+        for (std::size_t task = 0; task < task_count; ++task) {
+          WorkerAccum& accum = worker_accum[task];
+          for (int slot : accum.touched) {
+            if (slot < 0 ||
+                static_cast<std::size_t>(slot) >= color_bodies.size()) {
+              continue;
+            }
+            const int body = color_bodies[static_cast<std::size_t>(slot)];
+            if (body < 0) {
+              continue;
+            }
+            const std::size_t idx = static_cast<std::size_t>(body);
+            if (idx >= body_state.vx.size()) {
+              continue;
+            }
+            const BodyDelta& delta =
+                accum.deltas[static_cast<std::size_t>(slot)];
+            body_state.vx[idx] += delta.dvx;
+            body_state.vy[idx] += delta.dvy;
+            body_state.vz[idx] += delta.dvz;
+            body_state.wx[idx] += delta.dwx;
+            body_state.wy[idx] += delta.dwy;
+            body_state.wz[idx] += delta.dwz;
+          }
+        }
+
+        for (int body : color_bodies) {
+          if (body < 0) {
+            continue;
+          }
+          const std::size_t idx = static_cast<std::size_t>(body);
+          if (idx < body_slots.size()) {
+            body_slots[idx] = -1;
+          }
+        }
+
         friction_max_delta = std::max(friction_max_delta, color_max);
       }
     }

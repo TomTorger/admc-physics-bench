@@ -168,6 +168,27 @@ build/bench/bench --benchmark --benchmark_out="results/${STAMP}/results.csv" --b
 
 > The harness runs a fixed number of solver steps on each requested scene and appends to `results/YYYYMMDD/results.csv` when no explicit `--csv` path is given. See `docs/cli_reference.md` for all flags, defaults, and enumerations.
 
+The default human-readable mode now emits a compact, terminal-friendly summary. Example:
+
+```
+At-a-glance (best ms/step per solver & scene)
+Scene                  Contacts   Baseline  Cached  Scalar-SoA  SoA-Native  Vec-SoA   Best  Winner
+---------------------  --------   --------  ------  ----------  ----------  -------  -----  --------------
+spheres_cloud_10k         38599     17.475  23.356      17.993      10.640   18.048  10.640 SoA-Native
+
+Scalar-SoA (ms/step)
+Scene                  Threads   Contact      Row  J-Build  J-Pack    Solver     Warm     Iter    Integ  Scatter    Total
+---------------------  -------   -------  -------  -------  ------  --------  -------  -------  -------  -------  -------
+spheres_cloud_10k            1     2.812    3.615    0.000   0.003    11.317    0.092    6.018    0.500    0.000   17.993
+spheres_cloud_10k           16     2.793    4.035    0.000   0.001    11.406    0.107    6.233    0.494    0.000   18.415
+```
+
+Key switches:
+
+- `--human=compact|legacy` (default `compact`) toggles the new layout versus the previous verbose blocks.
+- `--timings=min|wide|json|off` (default `off`) prints machine-parsable lines after every solver row.
+- `--columns=<n>` overrides the detected terminal width for alignment/truncation.
+
 ---
 
 ## Solvers (what’s implemented)

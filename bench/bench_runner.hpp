@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -305,10 +306,13 @@ inline BenchResult run_cached(const std::string& scene_name,
 }
 
 // --------------------------- Public suite runner -----------------------------
+using ProgressCallback = std::function<void(const BenchResult&, std::size_t, std::size_t)>;
+
 inline std::vector<BenchResult>
 run_suite_for_scene(const std::string& scene_name,
                     const Scene& scene,
-                    const BenchConfig& cfg) {
+                    const BenchConfig& cfg,
+                    const ProgressCallback& progress = {}) {
   const int iterations = std::max(1, cfg.iterations);
   const int steps      = steps_for_scene_default(scene_name, cfg.steps);
   const double dt      = cfg.dt;
@@ -322,6 +326,22 @@ run_suite_for_scene(const std::string& scene_name,
   if (thread_counts.empty()) thread_counts.push_back(std::max(1, cfg.threads));
 
   std::vector<BenchResult> out;
+  auto count_variant_runs = [&]() -> std::size_t {
+    return thread_counts.size() * tile_sizes.size();
+  };
+  std::size_t total_expected = 0;
+  for (const auto& solver : cfg.solvers) {
+    if (solver == "baseline" || solver == "cached") {
+      total_expected += 1;
+    } else if (solver == "soa" || solver == "vec_soa" ||
+               solver == "soa_native" || solver == "soa_parallel") {
+      total_expected += count_variant_runs();
+    }
+  }
+  if (total_expected == 0) {
+    total_expected = 1;
+  }
+  std::size_t completed = 0;
 
   auto do_soa_variant = [&](SoaVariant v, bool use_simd) {
     for (int tc : thread_counts) {
@@ -347,6 +367,10 @@ run_suite_for_scene(const std::string& scene_name,
         if (ts > 0) { p2.tile_size = ts; p2.max_contacts_per_tile = ts; }
         auto r = run_soa_variant(scene_name, scene, p2, steps, -1.0, v);
         out.push_back(std::move(r));
+        ++completed;
+        if (progress) {
+          progress(out.back(), completed, total_expected);
+        }
       }
     }
   };
@@ -361,6 +385,10 @@ run_suite_for_scene(const std::string& scene_name,
       const auto t1 = Clock::now();
       r.ms_per_step = (steps > 0) ? (std::chrono::duration<double>(t1 - t0).count() * 1e3 / steps) : 0.0;
       out.push_back(std::move(r));
+      ++completed;
+      if (progress) {
+        progress(out.back(), completed, total_expected);
+      }
     } else if (solver == "cached") {
       SolverParams p{};
       p.iterations = iterations; p.dt = dt;
@@ -373,6 +401,10 @@ run_suite_for_scene(const std::string& scene_name,
       const auto t1 = Clock::now();
       r.ms_per_step = (steps > 0) ? (std::chrono::duration<double>(t1 - t0).count() * 1e3 / steps) : 0.0;
       out.push_back(std::move(r));
+      ++completed;
+      if (progress) {
+        progress(out.back(), completed, total_expected);
+      }
     } else if (solver == "soa") {
       do_soa_variant(SoaVariant::Legacy, /*use_simd*/ false);
     } else if (solver == "vec_soa") {

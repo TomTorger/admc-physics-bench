@@ -23,9 +23,9 @@ int main() {
   const Drift drift = directional_momentum_drift(pre, scene.bodies);
   assert(drift.max_abs < 1e-10);
 
-  const double u = pre[0].v.x;
-  const double v1 = scene.bodies[0].v.x;
-  const double v2 = scene.bodies[1].v.x;
+  [[maybe_unused]] const double u = pre[0].v.x;
+  [[maybe_unused]] const double v1 = scene.bodies[0].v.x;
+  [[maybe_unused]] const double v2 = scene.bodies[1].v.x;
 
   assert(std::fabs(v1 + u) < 1e-6);
   assert(std::fabs(v2 - u) < 1e-6);

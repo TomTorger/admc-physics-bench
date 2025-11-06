@@ -40,6 +40,9 @@ build/bench/bench \
 
 - `--csv=PATH` — write results to `PATH`. Directories are created as needed. Without this flag, the harness appends to `results/YYYYMMDD/results.csv`.
 - `--no-csv` — suppress CSV output.
+- `--human=compact|legacy` — pick the human-readable format. `compact` (default) prints the headline table + solver breakdowns; `legacy` restores the original verbose blocks.
+- `--timings=min|wide|json|off` — emit machine-parsable lines after each solver row (CSV-like `min`/`wide`, or JSON Lines). Default `off`.
+- `--columns=N` — override the terminal width used for alignment/truncation (defaults to `$COLUMNS` env or `100`).
 - `--benchmark` — enable Google Benchmark mode; any unknown flags are forwarded (e.g. `--benchmark_filter`, `--benchmark_out_format`). In this mode you should still add `--csv=...` if you want the harness CSV alongside the Google Benchmark output.
 - `--preset=NAME` — select a pre-defined scene bundle (currently `full` mirrors the large preset). This mirrors the `BENCH_PRESET` environment variable.
 - Unknown `--flag` values are passed straight through to Google Benchmark when `--benchmark` is specified.

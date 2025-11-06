@@ -1,6 +1,7 @@
 // bench/bench_cli.hpp
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -11,6 +12,8 @@
 namespace bench {
 
 struct BenchConfig {
+  enum class HumanMode { Compact, Legacy };
+  enum class TimingsMode { Off, Min, Wide, Json };
   // Scenes/solvers
   std::vector<std::string> scenes;   // default seeded if empty
   std::vector<std::string> solvers;  // default seeded if empty
@@ -36,6 +39,9 @@ struct BenchConfig {
   // Output
   bool        csv_mode = true;
   std::string csv_path;
+  HumanMode   human_mode = HumanMode::Compact;
+  TimingsMode timings_mode = TimingsMode::Off;
+  int         columns = -1;  // autodetect when < 0
 
   // Optional Google Benchmark interop
   bool run_benchmark = false;
@@ -49,6 +55,12 @@ inline std::string trim_copy(const std::string& s) {
   if (b == std::string::npos) return {};
   const auto e = s.find_last_not_of(" \t\r\n");
   return s.substr(b, e - b + 1);
+}
+
+inline std::string to_lower_copy(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
 }
 
 inline std::vector<std::string> split_csv_str(const std::string& value) {
@@ -203,6 +215,26 @@ inline BenchConfig parse_cli(int argc, char** argv, std::vector<char*>& passthro
       cfg.csv_mode = true; cfg.csv_path = arg.substr(6);
     } else if (arg == "--no-csv") {
       cfg.csv_mode = false;
+    } else if (starts("--human=")) {
+      const auto mode = to_lower_copy(arg.substr(8));
+      if (mode == "legacy") {
+        cfg.human_mode = BenchConfig::HumanMode::Legacy;
+      } else {
+        cfg.human_mode = BenchConfig::HumanMode::Compact;
+      }
+    } else if (starts("--timings=")) {
+      const auto mode = to_lower_copy(arg.substr(10));
+      if (mode == "min") {
+        cfg.timings_mode = BenchConfig::TimingsMode::Min;
+      } else if (mode == "wide") {
+        cfg.timings_mode = BenchConfig::TimingsMode::Wide;
+      } else if (mode == "json") {
+        cfg.timings_mode = BenchConfig::TimingsMode::Json;
+      } else {
+        cfg.timings_mode = BenchConfig::TimingsMode::Off;
+      }
+    } else if (starts("--columns=")) {
+      cfg.columns = parse_int_default(arg.substr(10), cfg.columns);
     } else if (starts("--preset=")) {
       preset_env = arg.substr(9).c_str();
     } else if (arg == "--benchmark") {

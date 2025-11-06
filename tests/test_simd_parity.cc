@@ -80,23 +80,23 @@ int main() {
   solve_scalar_soa_native(bodies_native, contacts_native, rows_native,
                           joint_rows_native, simd_params);
 
-  const double v_delta = max_velocity_delta(bodies_scalar, bodies_simd);
+  [[maybe_unused]] const double v_delta = max_velocity_delta(bodies_scalar, bodies_simd);
   assert(v_delta < 1e-9);
-  const double v_delta_native = max_velocity_delta(bodies_scalar, bodies_native);
+  [[maybe_unused]] const double v_delta_native = max_velocity_delta(bodies_scalar, bodies_native);
   assert(v_delta_native < 1e-9);
 
   for (std::size_t i = 0; i < rows_scalar.size(); ++i) {
-    const double diff_n = std::fabs(rows_scalar.jn[i] - rows_simd.jn[i]);
-    const double diff_t1 = std::fabs(rows_scalar.jt1[i] - rows_simd.jt1[i]);
-    const double diff_t2 = std::fabs(rows_scalar.jt2[i] - rows_simd.jt2[i]);
+    [[maybe_unused]] const double diff_n = std::fabs(rows_scalar.jn[i] - rows_simd.jn[i]);
+    [[maybe_unused]] const double diff_t1 = std::fabs(rows_scalar.jt1[i] - rows_simd.jt1[i]);
+    [[maybe_unused]] const double diff_t2 = std::fabs(rows_scalar.jt2[i] - rows_simd.jt2[i]);
     assert(diff_n < 1e-10);
     assert(diff_t1 < 1e-10);
     assert(diff_t2 < 1e-10);
-    const double diff_n_native =
+    [[maybe_unused]] const double diff_n_native =
         std::fabs(rows_scalar.jn[i] - rows_native.jn[i]);
-    const double diff_t1_native =
+    [[maybe_unused]] const double diff_t1_native =
         std::fabs(rows_scalar.jt1[i] - rows_native.jt1[i]);
-    const double diff_t2_native =
+    [[maybe_unused]] const double diff_t2_native =
         std::fabs(rows_scalar.jt2[i] - rows_native.jt2[i]);
     assert(diff_n_native < 1e-10);
     assert(diff_t1_native < 1e-10);

@@ -83,7 +83,10 @@ std::string solver_debug_summary(const SolverDebugInfo& info);
 struct SoaParams : SolverParams {
   bool use_simd = true;
   bool use_threads = true;
-  int thread_count = std::thread::hardware_concurrency();
+  int thread_count = [] {
+    const unsigned hw = std::thread::hardware_concurrency();
+    return hw > 0 ? static_cast<int>(hw) : 1;
+  }();
   int block_size = 128;
   double convergence_threshold = 1e-4;
 };
